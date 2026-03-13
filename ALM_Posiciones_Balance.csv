@@ -1,0 +1,12 @@
+ID_Posicion,Descripcion,Clase_Activo_Pasivo,Exposicion_Total_Notional,Moneda_Indexacion,Tasa_Costo
+ACT_INVERSION,Depto Inversión,Activo Real,150000000,UF,Rentabilidad por Arriendo
+ACT_LIQUIDEZ,Fondos Mutuos / Cuenta,Activo Líquido,10140000,CLP,Tasa Mercado
+PAS_HIPO_PRINCIPAL,Dividendo Depto Principal,Pasivo Estructural,-250000000,UF,Tasa Hipotecaria Consorcio
+PAS_HIPO_INVERSION,Dividendo Depto Inversión,Pasivo Estructural,-50000000,UF,Tasa Hipotecaria Itaú
+PAS_COL_SANGABRIEL,Colegio San Gabriel (10 Cuotas),Pasivo Corto Plazo,-14693144,CLP,0% (Sin interés)
+PAS_COL_INCORPORACION,Cuota Incorporación Colegio,Pasivo Corto Plazo,-4000000,CLP,0% (Sin interés)
+PAS_JARDIN_EMMA,Jardín Emma Anualidad,Pasivo Corto Plazo,-4345000,CLP,0%
+PAS_VISA_EB2,Firma Legal EE.UU. (NIW),Pasivo Corto Plazo,-4330128,USD,0%
+PAS_ABOGADO_LOC,Luis Salinas (Abogado),Pasivo Corto Plazo,-557314,CLP,0%
+PAS_TC_ROTATIVO,Consumo Variable TC Mensual,Pasivo Revolving,-2200000,CLP,Tasa Rotativo/Costo de Oportunidad
+PAS_PENSION,Pensión Alimenticia Amalia,Pasivo Estructural (Flujo Anualizado),-6720000,CLP/UF,Ajuste Legal
