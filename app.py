@@ -17,6 +17,8 @@ Menú progresivo:
 
 from __future__ import annotations
 
+import os
+
 import streamlit as st
 
 from core import state
@@ -74,7 +76,7 @@ else:
             default=True,
         ),
     ]
-    if layer >= 2:
+    if layer >= 2 and os.path.exists("pages/03_capa2_control.py"):
         _pages.append(
             st.Page(
                 "pages/03_capa2_control.py",
@@ -82,7 +84,7 @@ else:
                 icon="📋",
             )
         )
-    if layer >= 3:
+    if layer >= 3 and os.path.exists("pages/04_capa3_crecimiento.py"):
         _pages.append(
             st.Page(
                 "pages/04_capa3_crecimiento.py",
@@ -90,7 +92,7 @@ else:
                 icon="📈",
             )
         )
-    if layer >= 4:
+    if layer >= 4 and os.path.exists("pages/05_capa4_pro.py"):
         _pages.append(
             st.Page(
                 "pages/05_capa4_pro.py",
