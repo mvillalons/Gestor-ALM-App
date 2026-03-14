@@ -45,4 +45,4 @@ ALM_*.csv
 Tabla_*.csv
 
 # Logs
-*.log
+*.log.claude/
