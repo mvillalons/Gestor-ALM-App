@@ -45,8 +45,15 @@ def _make_defaults() -> dict[str, Any]:
         "dirty": False,
         "positions": {},
         "schedules": {},            # {id_posicion: pd.DataFrame} — tablas de desarrollo en memoria
-        "pasivos_con_tabla": [],    # lista de IDs de pasivos con tabla generada (Capa 3 unlock)
-        "afp_saldo": None,          # float | None — saldo AFP actual (Capa 3 unlock)
+        # Capa 2 unlock flags (set during onboarding, restored from Drive on load)
+        "meta_fondo_definida": False,
+        "buckets_confirmados": False,
+        # Capa 3 unlock data
+        "pasivos_con_tabla": [],    # lista de IDs de pasivos con tabla generada
+        "afp_saldo": None,          # float | None — saldo AFP actual
+        # Capa 4 unlock data
+        "activos_con_tabla": [],    # lista de IDs de activos financieros con tabla
+        "objetivos_activos": [],    # lista de IDs de objetivos de ahorro activos
         "layer_unlocked": 1,
         "onboarding_complete": False,
         "last_saved": None,
@@ -94,6 +101,12 @@ def init_session_state(_ss: dict | None = None) -> None:
     Claves inicializadas:
         - ``"dirty"`` → ``False``
         - ``"positions"`` → ``{}``
+        - ``"meta_fondo_definida"`` → ``False``  (Capa 2 unlock)
+        - ``"buckets_confirmados"`` → ``False``  (Capa 2 unlock)
+        - ``"pasivos_con_tabla"`` → ``[]``       (Capa 3 unlock)
+        - ``"afp_saldo"`` → ``None``             (Capa 3 unlock)
+        - ``"activos_con_tabla"`` → ``[]``       (Capa 4 unlock)
+        - ``"objetivos_activos"`` → ``[]``       (Capa 4 unlock)
         - ``"layer_unlocked"`` → ``1``
         - ``"onboarding_complete"`` → ``False``
         - ``"last_saved"`` → ``None``

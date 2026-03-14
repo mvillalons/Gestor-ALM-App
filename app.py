@@ -55,9 +55,18 @@ if not st.session_state.get("drive_loaded", False):
                 st.session_state["positions"] = _positions
                 st.session_state["onboarding_complete"] = True
 
-                # Cargar tablas de desarrollo para pasivos y AFP
+                # Si hay posiciones guardadas, el onboarding fue completado con
+                # meta_fondo_definida y buckets_confirmados en True (condición
+                # necesaria para que save_positions se ejecutara). Restaurarlos
+                # explícitamente porque NO se persisten en Drive como posiciones.
+                st.session_state["meta_fondo_definida"] = True
+                st.session_state["buckets_confirmados"] = True
+
+                # Cargar tablas de desarrollo y reconstruir listas de unlock
                 _schedules: dict = {}
                 _pasivos_con_tabla: list[str] = []
+                _activos_con_tabla: list[str] = []
+                _objetivos_activos: list[str] = []
 
                 for _pid, _pparams in _positions.items():
                     if _pid.startswith("PAS_"):
@@ -65,6 +74,7 @@ if not st.session_state.get("drive_loaded", False):
                         if _tabla is not None and not _tabla.empty:
                             _schedules[_pid] = _tabla
                             _pasivos_con_tabla.append(_pid)
+
                     elif _pid.startswith("AFP_"):
                         _tabla = drive.load_schedule(_svc, _folders, _pid)
                         if _tabla is not None and not _tabla.empty:
@@ -74,13 +84,31 @@ if not st.session_state.get("drive_loaded", False):
                         if _saldo_afp is not None:
                             st.session_state["afp_saldo"] = float(_saldo_afp)
 
+                    elif _pid.startswith("ACT_"):
+                        # Activos financieros con tabla de desarrollo (Capa 4 unlock)
+                        _tabla = drive.load_schedule(_svc, _folders, _pid)
+                        if _tabla is not None and not _tabla.empty:
+                            _schedules[_pid] = _tabla
+                            _activos_con_tabla.append(_pid)
+
+                    elif _pid.startswith("OBJ_"):
+                        # Objetivos de ahorro activos (Capa 4 unlock)
+                        _objetivos_activos.append(_pid)
+
                 if _schedules:
                     st.session_state["schedules"] = _schedules
                 if _pasivos_con_tabla:
                     st.session_state["pasivos_con_tabla"] = _pasivos_con_tabla
+                if _activos_con_tabla:
+                    st.session_state["activos_con_tabla"] = _activos_con_tabla
+                if _objetivos_activos:
+                    st.session_state["objetivos_activos"] = _objetivos_activos
 
-                # Recalcular capa desbloqueada con el estado restaurado
-                state.update_layer()
+                # Recalcular capa desbloqueada con TODOS los flags restaurados.
+                # Se pasa st.session_state explícitamente para evitar el lazy
+                # import interno de state._get_ss y garantizar que lee el estado
+                # ya mutado en este bloque.
+                state.update_layer(st.session_state)
 
                 # Marcar como sincronizado — los datos coinciden con Drive
                 state.mark_clean(datetime.now(tz=timezone.utc))
