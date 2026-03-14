@@ -3,9 +3,17 @@
 Responsabilidades:
   1. Única llamada a ``st.set_page_config()`` para toda la app.
   2. Inicializar el session_state antes de cualquier renderizado.
-  3. Construir el menú lateral dinámicamente según la capa desbloqueada.
-  4. Mostrar el ``status_label()`` de sincronización en el sidebar siempre.
-  5. Delegar la ejecución de la página activa a ``pg.run()``.
+  3. Cargar datos desde Drive UNA SOLA VEZ por sesión (flag ``drive_loaded``).
+  4. Construir el menú lateral dinámicamente según la capa desbloqueada.
+  5. Mostrar el ``status_label()`` de sincronización en el sidebar siempre.
+  6. Delegar la ejecución de la página activa a ``pg.run()``.
+
+Carga inicial desde Drive:
+  - Solo se ejecuta si ``token.json`` existe (usuario ya autenticó).
+  - Protegida por el flag ``drive_loaded`` en session_state para no
+    repetirse en cada rerun de Streamlit.
+  - Si Drive falla (sin conexión, token expirado), muestra un warning en el
+    sidebar y continúa con los datos en memoria. No bloquea la navegación.
 
 Menú progresivo:
   Sin onboarding completado → solo "👋 Bienvenido"
@@ -18,10 +26,11 @@ Menú progresivo:
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 
 import streamlit as st
 
-from core import state
+from core import drive, state
 
 # ── 1. Configuración global — debe ser el primer comando Streamlit ────────────
 st.set_page_config(
@@ -31,13 +40,63 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── 2. Estado de sesión ────────────────────────────────────────────────────────
+# ── 2. Estado de sesión — inicializar con defaults ────────────────────────────
 state.init_session_state()
 
+# ── 3. Carga inicial desde Drive (solo la primera vez en la sesión) ───────────
+if not st.session_state.get("drive_loaded", False):
+    if os.path.exists(drive.TOKEN_PATH):
+        try:
+            _svc = drive.authenticate_drive()
+            _folders = drive.ensure_folder_structure(_svc)
+            _positions = drive.load_positions(_svc, _folders)
+
+            if _positions:
+                st.session_state["positions"] = _positions
+                st.session_state["onboarding_complete"] = True
+
+                # Cargar tablas de desarrollo para pasivos y AFP
+                _schedules: dict = {}
+                _pasivos_con_tabla: list[str] = []
+
+                for _pid, _pparams in _positions.items():
+                    if _pid.startswith("PAS_"):
+                        _tabla = drive.load_schedule(_svc, _folders, _pid)
+                        if _tabla is not None and not _tabla.empty:
+                            _schedules[_pid] = _tabla
+                            _pasivos_con_tabla.append(_pid)
+                    elif _pid.startswith("AFP_"):
+                        _tabla = drive.load_schedule(_svc, _folders, _pid)
+                        if _tabla is not None and not _tabla.empty:
+                            _schedules[_pid] = _tabla
+                        # Restaurar afp_saldo para el cálculo de capas
+                        _saldo_afp = _pparams.get("Saldo_Actual")
+                        if _saldo_afp is not None:
+                            st.session_state["afp_saldo"] = float(_saldo_afp)
+
+                if _schedules:
+                    st.session_state["schedules"] = _schedules
+                if _pasivos_con_tabla:
+                    st.session_state["pasivos_con_tabla"] = _pasivos_con_tabla
+
+                # Recalcular capa desbloqueada con el estado restaurado
+                state.update_layer()
+
+                # Marcar como sincronizado — los datos coinciden con Drive
+                state.mark_clean(datetime.now(tz=timezone.utc))
+
+        except Exception as _exc:  # noqa: BLE001
+            # Drive no disponible o token expirado → continuar con memoria
+            st.session_state["_drive_load_error"] = str(_exc)
+
+    # Flag: no volver a intentar la carga en reruns posteriores
+    st.session_state["drive_loaded"] = True
+
+# ── 4. Leer estado — después de la posible carga desde Drive ──────────────────
 onboarding_done: bool = bool(st.session_state.get("onboarding_complete", False))
 layer: int = state.get_layer()
 
-# ── 3. Sidebar: branding + status (visible en todas las páginas) ───────────────
+# ── 5. Sidebar: branding + status + alerta de Drive ───────────────────────────
 with st.sidebar:
     st.markdown("### 📊 Gestor ALM")
 
@@ -49,6 +108,14 @@ with st.sidebar:
     else:
         st.caption(lbl)
 
+    # Mostrar error de carga UNA SOLA VEZ y limpiar (pop evita que persista)
+    _load_err: str | None = st.session_state.pop("_drive_load_error", None)
+    if _load_err:
+        st.warning(
+            f"⚠️ Drive no disponible: {_load_err[:100]}\n\n"
+            "Continuando con datos en memoria."
+        )
+
     st.divider()
 
     if onboarding_done:
@@ -57,7 +124,7 @@ with st.sidebar:
             st.caption(f"👤 {nombre}")
         st.caption(f"Capa desbloqueada: **{layer} / 4**")
 
-# ── 4. Lista de páginas según estado ──────────────────────────────────────────
+# ── 6. Lista de páginas según estado ──────────────────────────────────────────
 if not onboarding_done:
     _pages = [
         st.Page(
@@ -101,7 +168,7 @@ else:
             )
         )
 
-# ── 5. Navegación ──────────────────────────────────────────────────────────────
+# ── 7. Navegación ──────────────────────────────────────────────────────────────
 pg = st.navigation(_pages, position="sidebar")
 
 # CSS: simular layout="centered" durante el onboarding (app usa "wide")
@@ -121,5 +188,5 @@ if not onboarding_done:
         unsafe_allow_html=True,
     )
 
-# ── 6. Ejecutar la página activa ──────────────────────────────────────────────
+# ── 8. Ejecutar la página activa ──────────────────────────────────────────────
 pg.run()
