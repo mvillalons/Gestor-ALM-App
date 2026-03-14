@@ -5,6 +5,8 @@ import pytest
 from core.calculator import (
     BENCHMARK_CARGA_FINANCIERA,
     MESES_META_DEFAULT,
+    VALOR_UF_DEFAULT,
+    VALOR_USD_DEFAULT,
     capa_desbloqueada,
     carga_financiera,
     gap_fondo,
@@ -12,6 +14,7 @@ from core.calculator import (
     mes_stress,
     meta_fondo_reserva,
     meses_para_fondo,
+    normalizar_a_clp,
     posicion_vida_v1,
     posicion_vida_v2,
     posicion_vida_v3,
@@ -498,3 +501,121 @@ class TestIntegracionCapas:
         ml = margen_libre(2_000_000, 800_000, 700_000, 500_000)  # = 0
         assert ml == 0
         assert meses_para_fondo(500_000, ml) is None
+
+
+# ===========================================================================
+# normalizar_a_clp
+# ===========================================================================
+
+UF = 39_700.0    # tipo de cambio de prueba
+USD = 950.0
+
+
+class TestNormalizarAClp:
+    """Conversión de monedas a CLP."""
+
+    # ── Casos básicos ──────────────────────────────────────────────────────
+
+    def test_clp_sin_cambio(self):
+        assert normalizar_a_clp(500_000.0, "CLP", UF, USD) == 500_000.0
+
+    def test_uf_multiplica_por_valor_uf(self):
+        assert normalizar_a_clp(1.0, "UF", UF, USD) == pytest.approx(UF)
+
+    def test_usd_multiplica_por_valor_usd(self):
+        assert normalizar_a_clp(1.0, "USD", UF, USD) == pytest.approx(USD)
+
+    def test_uf_valor_exacto(self):
+        assert normalizar_a_clp(100.0, "UF", UF, USD) == pytest.approx(100.0 * UF)
+
+    def test_usd_valor_exacto(self):
+        assert normalizar_a_clp(1_000.0, "USD", UF, USD) == pytest.approx(1_000.0 * USD)
+
+    def test_cero_retorna_cero_cualquier_moneda(self):
+        assert normalizar_a_clp(0.0, "UF", UF, USD) == 0.0
+        assert normalizar_a_clp(0.0, "USD", UF, USD) == 0.0
+        assert normalizar_a_clp(0.0, "CLP", UF, USD) == 0.0
+
+    def test_negativo_preserva_signo(self):
+        """Flujos negativos (egresos) se convierten conservando el signo."""
+        result = normalizar_a_clp(-10.0, "UF", UF, USD)
+        assert result == pytest.approx(-10.0 * UF)
+
+    def test_moneda_desconocida_trata_como_clp(self):
+        """Moneda no reconocida → retorna el flujo sin cambio (trato como CLP)."""
+        assert normalizar_a_clp(123.0, "EUR", UF, USD) == pytest.approx(123.0)
+        assert normalizar_a_clp(456.0, "GBP", UF, USD) == pytest.approx(456.0)
+
+    def test_retorna_float(self):
+        result = normalizar_a_clp(100, "CLP", UF, USD)
+        assert isinstance(result, float)
+
+    # ── Constantes de módulo ───────────────────────────────────────────────
+
+    def test_valor_uf_default_es_positivo(self):
+        assert VALOR_UF_DEFAULT > 0
+
+    def test_valor_usd_default_es_positivo(self):
+        assert VALOR_USD_DEFAULT > 0
+
+    # ── Validaciones ───────────────────────────────────────────────────────
+
+    def test_valor_uf_cero_lanza_error(self):
+        with pytest.raises(ValueError, match="valor_uf"):
+            normalizar_a_clp(1.0, "UF", 0.0, USD)
+
+    def test_valor_uf_negativo_lanza_error(self):
+        with pytest.raises(ValueError, match="valor_uf"):
+            normalizar_a_clp(1.0, "UF", -1.0, USD)
+
+    def test_valor_usd_cero_lanza_error(self):
+        with pytest.raises(ValueError, match="valor_usd"):
+            normalizar_a_clp(1.0, "USD", UF, 0.0)
+
+    def test_valor_usd_negativo_lanza_error(self):
+        with pytest.raises(ValueError, match="valor_usd"):
+            normalizar_a_clp(1.0, "USD", UF, -50.0)
+
+    def test_valor_uf_invalido_sin_importar_moneda_clp(self):
+        """Incluso para CLP, los tipos de cambio deben ser válidos."""
+        with pytest.raises(ValueError):
+            normalizar_a_clp(500_000.0, "CLP", 0.0, USD)
+
+
+# ===========================================================================
+# carga_financiera con mezcla de monedas (normalización previa)
+# ===========================================================================
+
+
+class TestCargaFinancieraMixMoneda:
+    """carga_financiera() con cuotas en distintas monedas normalizadas a CLP."""
+
+    def test_cuota_uf_normalizada_da_ratio_correcto(self):
+        """Cuota de 10 UF, ingreso CLP 2_000_000."""
+        cuota_uf = 10.0  # UF
+        cuota_clp = normalizar_a_clp(cuota_uf, "UF", UF, USD)
+        ingreso_clp = 2_000_000.0
+        ratio = carga_financiera([cuota_clp], ingreso_clp)
+        assert ratio == pytest.approx(cuota_clp / ingreso_clp)
+
+    def test_cuota_usd_normalizada_da_ratio_correcto(self):
+        """Cuota de 500 USD, ingreso CLP 2_000_000."""
+        cuota_usd = 500.0
+        cuota_clp = normalizar_a_clp(cuota_usd, "USD", UF, USD)
+        ingreso_clp = 2_000_000.0
+        ratio = carga_financiera([cuota_clp], ingreso_clp)
+        assert ratio == pytest.approx(cuota_clp / ingreso_clp)
+
+    def test_mezcla_clp_uf_usd(self):
+        """Tres cuotas en distintas monedas se suman correctamente en CLP."""
+        c_clp = 300_000.0
+        c_uf = normalizar_a_clp(5.0, "UF", UF, USD)   # 5 UF en CLP
+        c_usd = normalizar_a_clp(200.0, "USD", UF, USD)  # 200 USD en CLP
+        ingreso = 3_000_000.0
+        ratio = carga_financiera([c_clp, c_uf, c_usd], ingreso)
+        expected = (c_clp + c_uf + c_usd) / ingreso
+        assert ratio == pytest.approx(expected)
+
+    def test_normalizacion_sin_cuotas_en_moneda_principal_da_cero(self):
+        """Sin cuotas, la carga financiera es 0 independiente de los FX."""
+        assert carga_financiera([], 2_000_000.0) == 0.0

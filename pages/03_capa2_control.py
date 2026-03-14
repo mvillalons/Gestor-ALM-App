@@ -54,6 +54,8 @@ _FORM_KEYS: list[str] = [
     "c2_desc", "c2_moneda_pas",
     # Hipotecario
     "c2_capital", "c2_tasa_anual_hip", "c2_plazo_meses", "c2_fecha_hip", "c2_metodo",
+    # Hipotecario — activo asociado (opcional)
+    "c2_activo_desc", "c2_activo_valor", "c2_activo_fecha",
     # Crédito consumo
     "c2_monto_con", "c2_n_cuotas_con", "c2_tasa_anual_con", "c2_fecha_con",
     # Colegio
@@ -236,6 +238,10 @@ def _abrir_formulario_pasivo(edit_id: str | None = None) -> None:
     if edit_id:
         params = state.get_position(edit_id) or {}
         st.session_state["c2_tipo_nuevo"] = params.get("Tipo", "Hipotecario")
+        # Pre-fill moneda (fuera del form) para que el selectbox muestre la moneda guardada
+        moneda_guardada = params.get("Moneda", _MONEDA)
+        if moneda_guardada in ["CLP", "UF", "USD"]:
+            st.session_state["c2_moneda_pas"] = moneda_guardada
 
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -283,7 +289,7 @@ with col_right:
         modo_label = "✏️ Editar pasivo" if edit_id else "➕ Nuevo pasivo"
         st.markdown(f"**{modo_label}**")
 
-        # Selectbox FUERA del form — para recargar campos según tipo
+        # Selectbox FUERA del form — para recargar campos según tipo Y moneda
         tipo_default = editing_params.get("Tipo", "Hipotecario")
         tipo_idx = _TIPOS_PASIVO.index(tipo_default) if tipo_default in _TIPOS_PASIVO else 0
         tipo = st.selectbox(
@@ -293,6 +299,21 @@ with col_right:
             key="c2_tipo_nuevo",
         )
 
+        # Moneda también FUERA del form — su cambio recarga los labels de montos
+        _mon_opts = ["CLP", "UF", "USD"]
+        _mon_default = st.session_state.get(
+            "c2_moneda_pas",
+            editing_params.get("Moneda", _MONEDA),
+        )
+        if _mon_default not in _mon_opts:
+            _mon_default = "CLP"
+        moneda_pas = st.selectbox(
+            "Moneda",
+            _mon_opts,
+            index=_mon_opts.index(_mon_default),
+            key="c2_moneda_pas",
+        )
+
         with st.form("form_pasivo", clear_on_submit=False):
             descripcion = st.text_input(
                 "Descripción",
@@ -300,21 +321,13 @@ with col_right:
                 key="c2_desc",
                 placeholder="Ej: Hipoteca departamento, Colegio hijo mayor…",
             )
-            moneda_pas = st.selectbox(
-                "Moneda",
-                ["CLP", "UF", "USD"],
-                index=["CLP", "UF", "USD"].index(
-                    editing_params.get("Moneda", _MONEDA)
-                    if editing_params.get("Moneda", _MONEDA) in ["CLP", "UF", "USD"]
-                    else "CLP"
-                ),
-                key="c2_moneda_pas",
-            )
 
             # ── Campos específicos por tipo ──────────────────────────────────
             if tipo == "Hipotecario":
                 _step = 1.0 if moneda_pas == "UF" else 1_000_000
-                _fmt_num = "%.2f" if moneda_pas == "UF" else "%d"
+                # "%.0f" evita el warning de Streamlit cuando value es float pero el
+                # formato visual es entero; "%.2f" para UF donde importan decimales.
+                _fmt_num = "%.2f" if moneda_pas == "UF" else "%.0f"
                 _def_cap = editing_params.get("Capital", 2000.0 if moneda_pas == "UF" else 50_000_000)
                 capital = st.number_input(
                     f"Capital ({moneda_pas})",
@@ -345,6 +358,42 @@ with col_right:
                     index=0 if editing_params.get("Metodo", "frances") == "frances" else 1,
                     format_func=lambda x: "Francés (cuota fija)" if x == "frances" else "Alemán (amort. constante)",
                     key="c2_metodo",
+                )
+
+                # ── Activo hipotecado (opcional) ─────────────────────────────
+                st.markdown("---")
+                st.markdown("**🏠 Activo hipotecado** *(opcional)*")
+                st.caption(
+                    "Si registras el valor comercial de la propiedad, "
+                    "calcularemos el LTV y tu patrimonio neto inmobiliario."
+                )
+                # Buscar datos del activo asociado si existe (modo edición)
+                _act_suffix = edit_id.rsplit("_", 1)[-1] if edit_id else None
+                _act_real_params = (
+                    state.get_position(f"ACT_REAL_{_act_suffix}") or {}
+                    if _act_suffix else {}
+                )
+                activo_desc = st.text_input(
+                    "Descripción del activo",
+                    value=_act_real_params.get("Descripcion", ""),
+                    key="c2_activo_desc",
+                    placeholder="Ej: Depto. Las Condes, Casa Providencia…",
+                )
+                activo_valor = st.number_input(
+                    f"Valor comercial ({moneda_pas})",
+                    min_value=0.0,
+                    value=float(_act_real_params.get("Valor_Comercial", 0.0)),
+                    step=float(_step),
+                    format=_fmt_num,
+                    key="c2_activo_valor",
+                    help="Estimación del valor de mercado actual. Deja en 0 para omitir.",
+                )
+                activo_fecha = st.date_input(
+                    "Fecha de última estimación",
+                    value=date.fromisoformat(
+                        str(_act_real_params.get("Fecha_Valoracion", date.today().isoformat()))
+                    ),
+                    key="c2_activo_fecha",
                 )
 
             elif tipo == "Crédito consumo":
@@ -560,6 +609,25 @@ with col_right:
                 if edit_id and edit_id != id_final:
                     _eliminar_pasivo(edit_id)
 
+                # Activo hipotecado — guardar/eliminar DESPUÉS de conocer id_final
+                if tipo == "Hipotecario":
+                    _act_suf = id_final.rsplit("_", 1)[-1]
+                    _act_real_id = f"ACT_REAL_{_act_suf}"
+                    if activo_valor > 0:
+                        state.set_position(_act_real_id, {
+                            "Tipo": "Activo_Real",
+                            "Clase": "Activo_Real",
+                            "Descripcion": activo_desc.strip() or descripcion.strip(),
+                            "Moneda": moneda_pas,
+                            "Capa_Activacion": 2,
+                            "Valor_Comercial": activo_valor,
+                            "Fecha_Valoracion": activo_fecha.isoformat(),
+                            "Pasivo_Asociado": id_final,
+                        })
+                    else:
+                        # Si el usuario dejó valor=0, eliminar el activo si existía
+                        state.delete_position(_act_real_id)
+
                 # Generar tabla de desarrollo
                 tabla = _generar_tabla(tipo, params_nuevos, id_final)
                 if tabla is not None:
@@ -589,6 +657,24 @@ with col_right:
                         f"Saldo {_fmt(saldo_p)} · Cuota {_fmt(cuota_p)}/mes · "
                         f"Término {termino_p}"
                     )
+                    # LTV y patrimonio neto para hipotecarios con activo registrado
+                    if pid.startswith("PAS_HIP"):
+                        _ltv_suffix = pid.rsplit("_", 1)[-1]
+                        _act_real = state.get_position(f"ACT_REAL_{_ltv_suffix}") or {}
+                        _valor_com = float(_act_real.get("Valor_Comercial", 0))
+                        if _valor_com > 0:
+                            _ltv_pct = (saldo_p / _valor_com) * 100
+                            _patr_neto = _valor_com - saldo_p
+                            if _ltv_pct < 70:
+                                _ltv_icon, _ltv_color = "🟢", "green"
+                            elif _ltv_pct < 90:
+                                _ltv_icon, _ltv_color = "🟡", "orange"
+                            else:
+                                _ltv_icon, _ltv_color = "🔴", "red"
+                            st.caption(
+                                f"{_ltv_icon} LTV: :{_ltv_color}[**{_ltv_pct:.1f}%**] · "
+                                f"Patrimonio neto: **{_fmt(_patr_neto)}**"
+                            )
                 with c2:
                     if st.button("✏️", key=f"edit_{pid}", help="Editar"):
                         _abrir_formulario_pasivo(edit_id=pid)
@@ -596,6 +682,9 @@ with col_right:
                 with c3:
                     if st.button("🗑️", key=f"del_{pid}", help="Eliminar"):
                         _eliminar_pasivo(pid)
+                        # También eliminar el activo hipotecado asociado si existe
+                        if pid.startswith("PAS_HIP"):
+                            state.delete_position(f"ACT_REAL_{pid.rsplit('_', 1)[-1]}")
                         state.mark_dirty()
                         st.rerun()
     elif not st.session_state.get("c2_show_add_form", False):
@@ -756,13 +845,37 @@ with col_right:
 # MÉTRICAS — calculadas desde session_state; renderizadas en el placeholder
 # ────────────────────────────────────────────────────────────────────────────
 
-# Datos base de Capa 1
-_ing = float(_pos("ING_PRINCIPAL").get("Monto_Mensual", 1))
-_ese = float(_pos("GAS_ESE_BUCKET").get("Monto_Mensual", 0))
-_liq = float(_pos("ACT_LIQUIDO_PRINCIPAL").get("Saldo_Actual", 0))
+# Tipos de cambio para normalización a CLP (leídos desde session_state)
+# El usuario los ajusta en el expander "⚙️ Tipo de cambio" dentro del placeholder.
+_valor_uf: float = float(st.session_state.get("valor_uf", 39_700.0))
+_valor_usd: float = float(st.session_state.get("valor_usd", 950.0))
 
-# Cuotas actuales de todos los pasivos
-_cuotas: list[float] = [_cuota_actual(pid) for pid in _all_pasivo_ids()]
+# Datos base de Capa 1 — normalizados a CLP para comparabilidad entre monedas
+_ing = calculator.normalizar_a_clp(
+    float(_pos("ING_PRINCIPAL").get("Monto_Mensual", 1)),
+    _pos("ING_PRINCIPAL").get("Moneda", _MONEDA),
+    _valor_uf, _valor_usd,
+)
+_ese = calculator.normalizar_a_clp(
+    float(_pos("GAS_ESE_BUCKET").get("Monto_Mensual", 0)),
+    _pos("GAS_ESE_BUCKET").get("Moneda", _MONEDA),
+    _valor_uf, _valor_usd,
+)
+_liq = calculator.normalizar_a_clp(
+    float(_pos("ACT_LIQUIDO_PRINCIPAL").get("Saldo_Actual", 0)),
+    _pos("ACT_LIQUIDO_PRINCIPAL").get("Moneda", _MONEDA),
+    _valor_uf, _valor_usd,
+)
+
+# Cuotas normalizadas a CLP (cada pasivo puede estar en UF, USD o CLP)
+_cuotas_clp: list[float] = [
+    calculator.normalizar_a_clp(
+        _cuota_actual(pid),
+        _pos(pid).get("Moneda", "CLP"),
+        _valor_uf, _valor_usd,
+    )
+    for pid in _all_pasivo_ids()
+]
 
 # Tablas de pasivos (excluye AFP) para flujo neto
 _schedules_dict = st.session_state.get("schedules", {})
@@ -780,10 +893,38 @@ if _all_pasivo_ids():
 
 with _metrics_ph.container():
 
+    # ── Tipo de cambio (configuración manual) ─────────────────────────────────
+    with st.expander("⚙️ Tipo de cambio", expanded=False):
+        st.caption(
+            "Valores usados para convertir UF y USD a CLP en todas las métricas. "
+            "Actualiza manualmente con el valor del día."
+        )
+        _col_uf, _col_usd = st.columns(2)
+        with _col_uf:
+            st.number_input(
+                "Valor UF (CLP/UF)",
+                min_value=1.0,
+                step=100.0,
+                format="%.0f",
+                key="valor_uf",
+                help="Fuente: Banco Central de Chile (www.bcentral.cl)",
+            )
+        with _col_usd:
+            st.number_input(
+                "Dólar USD (CLP/USD)",
+                min_value=1.0,
+                step=10.0,
+                format="%.0f",
+                key="valor_usd",
+                help="Tipo de cambio observado del día.",
+            )
+
+    st.divider()
+
     # ── Métrica 1: Carga financiera ───────────────────────────────────────────
     st.markdown("#### Carga Financiera")
     if _ing > 0:
-        _carga = calculator.carga_financiera(_cuotas, _ing)
+        _carga = calculator.carga_financiera(_cuotas_clp, _ing)
         if _carga < 0.35:
             icon_c, label_c = "🟢", f"Saludable · {_carga*100:.1f}% del ingreso"
         elif _carga < 0.50:
@@ -804,9 +945,9 @@ with _metrics_ph.container():
 
     # ── Métrica 2: Posición de Vida v2 ────────────────────────────────────────
     st.markdown("#### Posición de Vida v2")
-    _denominador = _ese + sum(_cuotas)
+    _denominador = _ese + sum(_cuotas_clp)
     if _denominador > 0:
-        _pv2 = calculator.posicion_vida_v2(_liq, _ese, _cuotas)
+        _pv2 = calculator.posicion_vida_v2(_liq, _ese, _cuotas_clp)
         if _pv2 >= 3:
             icon_p, d_txt, d_col = "🟢", "Saludable — ≥ 3 meses", "normal"
         elif _pv2 >= 1:
@@ -828,7 +969,9 @@ with _metrics_ph.container():
     # ── Métrica 3: Flujo neto mensual (gráfico) ───────────────────────────────
     st.markdown("#### Flujo Neto Mensual")
     if _tablas_pasivos:
-        _df_flujo = schedule.flujo_neto_mensual(_tablas_pasivos, _ing)
+        _df_flujo = schedule.flujo_neto_mensual(
+            _tablas_pasivos, _ing, _valor_uf, _valor_usd
+        )
         # Mostrar solo los próximos 24 meses
         hoy_str = date.today().strftime("%Y-%m")
         _df_flujo = _df_flujo[_df_flujo["Periodo"] >= hoy_str].head(24)

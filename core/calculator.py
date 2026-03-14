@@ -244,6 +244,70 @@ def posicion_vida_v3(
 
 
 # ---------------------------------------------------------------------------
+# Normalización de moneda — conversión a CLP
+# ---------------------------------------------------------------------------
+
+#: Valor UF en CLP usado por defecto cuando no hay configuración del usuario.
+VALOR_UF_DEFAULT: float = 39_700.0
+
+#: Tipo de cambio USD/CLP usado por defecto cuando no hay configuración del usuario.
+VALOR_USD_DEFAULT: float = 950.0
+
+
+def normalizar_a_clp(
+    flujo: float,
+    moneda: str,
+    valor_uf: float,
+    valor_usd: float,
+) -> float:
+    """Convierte un valor monetario a CLP según la moneda indicada.
+
+    Función de normalización para comparar métricas expresadas en distintas
+    monedas (UF, USD) con el ingreso o los gastos en CLP.
+
+    Los tipos de cambio son manuales (actualizados por el usuario). En Capa 4
+    se reemplazarán por la API del Banco Central / SII.
+
+    Args:
+        flujo: Valor en la moneda original (puede ser positivo o negativo).
+        moneda: Código de moneda: ``"CLP"``, ``"UF"`` o ``"USD"``.
+            Cualquier otro valor se trata como CLP (retorna el flujo sin cambio).
+        valor_uf: Tipo de cambio UF → CLP (CLP por cada UF). Debe ser > 0.
+        valor_usd: Tipo de cambio USD → CLP (CLP por cada dólar). Debe ser > 0.
+
+    Returns:
+        Equivalente en CLP:
+        - ``"UF"``  → ``flujo * valor_uf``
+        - ``"USD"`` → ``flujo * valor_usd``
+        - ``"CLP"`` (o desconocida) → ``flujo`` sin cambio.
+
+    Raises:
+        ValueError: Si ``valor_uf`` o ``valor_usd`` son menores o iguales a cero.
+
+    Examples:
+        >>> normalizar_a_clp(100.0, "UF", 39_700.0, 950.0)
+        3970000.0
+        >>> normalizar_a_clp(1_000.0, "USD", 39_700.0, 950.0)
+        950000.0
+        >>> normalizar_a_clp(500_000.0, "CLP", 39_700.0, 950.0)
+        500000.0
+    """
+    if valor_uf <= 0:
+        raise ValueError(
+            f"valor_uf debe ser mayor que cero, se recibió {valor_uf}."
+        )
+    if valor_usd <= 0:
+        raise ValueError(
+            f"valor_usd debe ser mayor que cero, se recibió {valor_usd}."
+        )
+    if moneda == "UF":
+        return flujo * valor_uf
+    if moneda == "USD":
+        return flujo * valor_usd
+    return float(flujo)  # CLP u otro → sin cambio
+
+
+# ---------------------------------------------------------------------------
 # Helper general — desbloqueo de capas
 # ---------------------------------------------------------------------------
 

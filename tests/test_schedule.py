@@ -642,7 +642,11 @@ class TestFlujoNetoMensual:
         fecha = _parse_fecha(self.FECHA)
         rows = []
         for _ in range(n):
-            rows.append({"Periodo": fecha.strftime("%Y-%m"), "Flujo_Periodo": flujo})
+            rows.append({
+                "Periodo": fecha.strftime("%Y-%m"),
+                "Flujo_Periodo": flujo,
+                "Moneda": moneda,
+            })
             fecha = _next_month(fecha)
         return pd.DataFrame(rows)
 
@@ -705,3 +709,96 @@ class TestFlujoNetoMensual:
     def test_ingreso_negativo_falla(self):
         with pytest.raises(ValueError, match="ingreso_mensual"):
             flujo_neto_mensual([self._tabla_simple()], -1)
+
+
+# ===========================================================================
+# flujo_neto_mensual — normalización de monedas
+# ===========================================================================
+
+_UF_TEST = 39_700.0
+_USD_TEST = 950.0
+
+
+class TestFlujoNetoMensualMultiMoneda:
+    """flujo_neto_mensual normaliza flujos UF/USD a CLP antes de sumar."""
+
+    FECHA = date(2026, 4, 1)
+    INGRESO = 2_000_000.0
+
+    def _tabla_moneda(self, n=12, flujo=-100.0, moneda="UF") -> pd.DataFrame:
+        from core.schedule import _next_month, _parse_fecha  # noqa: PLC0415
+        fecha = _parse_fecha(self.FECHA)
+        rows = []
+        for _ in range(n):
+            rows.append({
+                "Periodo": fecha.strftime("%Y-%m"),
+                "Flujo_Periodo": flujo,
+                "Moneda": moneda,
+            })
+            fecha = _next_month(fecha)
+        return pd.DataFrame(rows)
+
+    def test_flujo_uf_se_convierte_a_clp(self):
+        """Cuota de -10 UF debe convertirse a -10 * valor_uf CLP."""
+        t = self._tabla_moneda(flujo=-10.0, moneda="UF")
+        df = flujo_neto_mensual([t], self.INGRESO, valor_uf=_UF_TEST, valor_usd=_USD_TEST)
+        expected_flujo_pasivos = -10.0 * _UF_TEST
+        assert (abs(df["Flujo_Pasivos"] - expected_flujo_pasivos) < 1.0).all()
+
+    def test_flujo_usd_se_convierte_a_clp(self):
+        """Cuota de -500 USD debe convertirse a -500 * valor_usd CLP."""
+        t = self._tabla_moneda(flujo=-500.0, moneda="USD")
+        df = flujo_neto_mensual([t], self.INGRESO, valor_uf=_UF_TEST, valor_usd=_USD_TEST)
+        expected_flujo_pasivos = -500.0 * _USD_TEST
+        assert (abs(df["Flujo_Pasivos"] - expected_flujo_pasivos) < 1.0).all()
+
+    def test_flujo_clp_sin_conversion(self):
+        """Cuota en CLP no cambia al normalizar."""
+        t = self._tabla_moneda(flujo=-300_000.0, moneda="CLP")
+        df = flujo_neto_mensual([t], self.INGRESO, valor_uf=_UF_TEST, valor_usd=_USD_TEST)
+        assert (abs(df["Flujo_Pasivos"] - (-300_000.0)) < 1.0).all()
+
+    def test_mezcla_uf_y_clp_suma_correctamente(self):
+        """Tabla UF + tabla CLP → suma normalizada a CLP."""
+        t_uf = self._tabla_moneda(flujo=-5.0, moneda="UF")
+        t_clp = self._tabla_moneda(flujo=-200_000.0, moneda="CLP")
+        df = flujo_neto_mensual(
+            [t_uf, t_clp], self.INGRESO, valor_uf=_UF_TEST, valor_usd=_USD_TEST
+        )
+        expected = -5.0 * _UF_TEST + (-200_000.0)
+        assert (abs(df["Flujo_Pasivos"] - expected) < 1.0).all()
+
+    def test_mezcla_usd_clp_uf(self):
+        """Tres tablas en distintas monedas suman correctamente en CLP."""
+        t_uf = self._tabla_moneda(flujo=-3.0, moneda="UF")
+        t_usd = self._tabla_moneda(flujo=-200.0, moneda="USD")
+        t_clp = self._tabla_moneda(flujo=-100_000.0, moneda="CLP")
+        df = flujo_neto_mensual(
+            [t_uf, t_usd, t_clp], self.INGRESO, valor_uf=_UF_TEST, valor_usd=_USD_TEST
+        )
+        expected = -3.0 * _UF_TEST + (-200.0 * _USD_TEST) + (-100_000.0)
+        assert (abs(df["Flujo_Pasivos"] - expected) < 1.0).all()
+
+    def test_flujo_neto_correcto_con_normalizacion(self):
+        """Flujo_Neto = Ingreso + Flujo_Pasivos (normalizado)."""
+        t = self._tabla_moneda(flujo=-10.0, moneda="UF")
+        df = flujo_neto_mensual([t], self.INGRESO, valor_uf=_UF_TEST, valor_usd=_USD_TEST)
+        expected_neto = self.INGRESO + (-10.0 * _UF_TEST)
+        assert (abs(df["Flujo_Neto"] - expected_neto) < 1.0).all()
+
+    def test_tabla_sin_columna_moneda_trata_como_clp(self):
+        """Si la tabla no tiene columna Moneda, trata los flujos como CLP."""
+        from core.schedule import _next_month, _parse_fecha  # noqa: PLC0415
+        fecha = _parse_fecha(self.FECHA)
+        rows = [{"Periodo": fecha.strftime("%Y-%m"), "Flujo_Periodo": -100_000.0}]
+        t = pd.DataFrame(rows)  # sin columna Moneda
+        df = flujo_neto_mensual([t], self.INGRESO, valor_uf=_UF_TEST, valor_usd=_USD_TEST)
+        assert abs(df["Flujo_Pasivos"].iloc[0] - (-100_000.0)) < 1.0
+
+    def test_valor_uf_afecta_magnitud(self):
+        """Cambiar valor_uf cambia el Flujo_Pasivos proporcionalmente."""
+        t = self._tabla_moneda(flujo=-1.0, moneda="UF")
+        df_a = flujo_neto_mensual([t], self.INGRESO, valor_uf=30_000.0, valor_usd=_USD_TEST)
+        df_b = flujo_neto_mensual([t], self.INGRESO, valor_uf=40_000.0, valor_usd=_USD_TEST)
+        # 40k UF → flujo más negativo
+        assert df_b["Flujo_Pasivos"].iloc[0] < df_a["Flujo_Pasivos"].iloc[0]

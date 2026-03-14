@@ -54,6 +54,9 @@ def _make_defaults() -> dict[str, Any]:
         # Capa 4 unlock data
         "activos_con_tabla": [],    # lista de IDs de activos financieros con tabla
         "objetivos_activos": [],    # lista de IDs de objetivos de ahorro activos
+        # Tipos de cambio para normalización a CLP (actualización manual hasta Capa 4)
+        "valor_uf": 39_700.0,       # CLP por UF  — fuente: Banco Central (manual)
+        "valor_usd": 950.0,         # CLP por USD — fuente: BCCh / SII (manual)
         "layer_unlocked": 1,
         "onboarding_complete": False,
         "last_saved": None,

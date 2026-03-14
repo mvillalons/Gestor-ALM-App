@@ -585,22 +585,38 @@ def gen_afp(
 def flujo_neto_mensual(
     tablas: list[pd.DataFrame],
     ingreso_mensual: float,
+    valor_uf: float = 39_700.0,
+    valor_usd: float = 950.0,
 ) -> pd.DataFrame:
     """Consolida el flujo neto mensual sumando pagos de pasivos e ingreso.
 
     Agrega los ``Flujo_Periodo`` de todas las tablas proporcionadas (negativos
     para pasivos) y los combina con el ingreso mensual constante del usuario.
 
+    Normalización de moneda: si alguna tabla tiene flujos en UF o USD, éstos
+    se convierten a CLP antes de sumar usando ``valor_uf`` y ``valor_usd``.
+    La columna ``Moneda`` de cada tabla se usa para determinar la conversión.
+    Si la columna ``Moneda`` no existe en una tabla, sus flujos se tratan
+    como CLP (sin conversión).
+
+    ``ingreso_mensual`` debe expresarse ya en CLP (o en la misma moneda base
+    de referencia) — la conversión del ingreso es responsabilidad del llamador.
+
     Args:
         tablas: Lista de DataFrames de tablas de desarrollo.
             Cada uno debe tener las columnas ``Periodo`` y ``Flujo_Periodo``.
-        ingreso_mensual: Ingreso mensual del usuario (constante en todo el
-            horizonte). Debe ser >= 0.
+            La columna ``Moneda`` es opcional; si falta se asume ``"CLP"``.
+        ingreso_mensual: Ingreso mensual del usuario en CLP (constante en
+            todo el horizonte). Debe ser >= 0.
+        valor_uf: Tipo de cambio UF → CLP usado para normalizar flujos en UF.
+            Por defecto :data:`~core.calculator.VALOR_UF_DEFAULT` (39 700).
+        valor_usd: Tipo de cambio USD → CLP usado para normalizar flujos en USD.
+            Por defecto :data:`~core.calculator.VALOR_USD_DEFAULT` (950).
 
     Returns:
         :class:`pandas.DataFrame` con columnas:
             - ``Periodo`` (YYYY-MM, ordenado ascendente)
-            - ``Flujo_Pasivos`` (suma de pagos, negativo para deudas)
+            - ``Flujo_Pasivos`` (suma de pagos en CLP, negativo para deudas)
             - ``Ingreso`` (= ``ingreso_mensual`` para todos los períodos)
             - ``Flujo_Neto`` (= ``Ingreso`` + ``Flujo_Pasivos``)
 
@@ -619,15 +635,33 @@ def flujo_neto_mensual(
     if not tablas:
         return pd.DataFrame(columns=_cols_out)
 
-    combined = pd.concat(
-        [t[["Periodo", "Flujo_Periodo"]].copy() for t in tablas],
-        ignore_index=True,
-    )
+    def _a_clp(flujo: float, moneda: str) -> float:
+        """Convierte un flujo a CLP según su moneda."""
+        if moneda == "UF":
+            return flujo * valor_uf
+        if moneda == "USD":
+            return flujo * valor_usd
+        return float(flujo)  # CLP u otra moneda → sin cambio
+
+    frames: list[pd.DataFrame] = []
+    for t in tablas:
+        chunk = t[["Periodo", "Flujo_Periodo"]].copy()
+        # Usar la columna Moneda si existe; si no, asumir CLP
+        moneda_serie = (
+            t["Moneda"] if "Moneda" in t.columns
+            else pd.Series(["CLP"] * len(t), index=t.index)
+        )
+        chunk["Flujo_CLP"] = [
+            _a_clp(f, m) for f, m in zip(chunk["Flujo_Periodo"], moneda_serie)
+        ]
+        frames.append(chunk[["Periodo", "Flujo_CLP"]])
+
+    combined = pd.concat(frames, ignore_index=True)
     grouped = (
-        combined.groupby("Periodo", sort=True)["Flujo_Periodo"]
+        combined.groupby("Periodo", sort=True)["Flujo_CLP"]
         .sum()
         .reset_index()
-        .rename(columns={"Flujo_Periodo": "Flujo_Pasivos"})
+        .rename(columns={"Flujo_CLP": "Flujo_Pasivos"})
     )
     grouped["Ingreso"] = ingreso_mensual
     grouped["Flujo_Neto"] = grouped["Ingreso"] + grouped["Flujo_Pasivos"]
