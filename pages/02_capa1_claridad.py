@@ -23,16 +23,8 @@ import streamlit as st
 from core import calculator, drive, state
 
 # ── Configuración de página ───────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Capa 1 — Claridad · Gestor ALM",
-    page_icon="📊",
-    layout="wide",
-)
-
+# set_page_config() y el guard de onboarding se gestionan en app.py.
 state.init_session_state()
-
-if not st.session_state.get("onboarding_complete", False):
-    st.switch_page("pages/01_onboarding.py")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

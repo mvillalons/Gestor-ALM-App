@@ -1,104 +1,123 @@
+"""app.py — Entrada principal y enrutador del Gestor ALM.
+
+Responsabilidades:
+  1. Única llamada a ``st.set_page_config()`` para toda la app.
+  2. Inicializar el session_state antes de cualquier renderizado.
+  3. Construir el menú lateral dinámicamente según la capa desbloqueada.
+  4. Mostrar el ``status_label()`` de sincronización en el sidebar siempre.
+  5. Delegar la ejecución de la página activa a ``pg.run()``.
+
+Menú progresivo:
+  Sin onboarding completado → solo "👋 Bienvenido"
+  Capa 1 (siempre)         → "🏠 Mi Resumen"
+  Capa 2+                  → "📋 Mis Compromisos"
+  Capa 3+                  → "📈 Mi Crecimiento"
+  Capa 4+                  → "🏛️ Modo Pro"
+"""
+
+from __future__ import annotations
+
 import streamlit as st
-import pandas as pd
-import plotly.express as px
-import os
-import io
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
 
-# Usamos el permiso de solo lectura para buscar los archivos que subiste
-SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+from core import state
 
-@st.cache_resource
-def authenticate_drive():
-    creds = None
-    # El archivo token.json guarda tu sesión para no pedirte clave cada vez
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
-    return build('drive', 'v3', credentials=creds)
+# ── 1. Configuración global — debe ser el primer comando Streamlit ────────────
+st.set_page_config(
+    page_title="Gestor ALM",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-@st.cache_data
-def load_data_from_drive(_service, file_name):
-    # Buscar el archivo por nombre exacto en el Drive
-    results = _service.files().list(q=f"name='{file_name}'", spaces='drive', fields='files(id, name)').execute()
-    items = results.get('files', [])
-    
-    if not items:
-        return None
-    
-    # Descargar el archivo directamente a la memoria (BytesIO)
-    file_id = items[0]['id']
-    request = _service.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while done is False:
-        status, done = downloader.next_chunk()
-    
-    fh.seek(0)
-    return pd.read_csv(fh)
+# ── 2. Estado de sesión ────────────────────────────────────────────────────────
+state.init_session_state()
 
-# --- CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="Gestor ALM Personal", layout="wide")
-st.title("🏛️ Gestor ALM Personal (BYOS)")
-st.markdown("Leyendo datos estructurados directamente desde tu bóveda en Google Drive...")
+onboarding_done: bool = bool(st.session_state.get("onboarding_complete", False))
+layer: int = state.get_layer()
 
-# --- MOTOR ALM ---
-try:
-    service = authenticate_drive()
-    
-    with st.spinner("Conectando con Google Drive y buscando archivos..."):
-        df_pos = load_data_from_drive(service, 'ALM_Posiciones_Balance.csv')
-        df_flujos = load_data_from_drive(service, 'ALM_Flujos_Settlement.csv')
-    
-    if df_pos is not None and df_flujos is not None:
-        st.success("¡Datos sincronizados exitosamente desde Google Drive!")
-        
-        # --- PESTAÑA 1: BALANCE SHEET ---
-        st.header("1. Balance Sheet (Exposición Actual)")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("Tu Exposición Efectiva (Notional)")
-            st.dataframe(df_pos[['ID_Posicion', 'Descripcion', 'Clase_Activo_Pasivo', 'Exposicion_Total_Notional', 'Moneda_Indexacion']], use_container_width=True)
-        
-        with col2:
-            fig_pie = px.pie(df_pos, values=df_pos['Exposicion_Total_Notional'].abs(), names='Clase_Activo_Pasivo', title="Distribución de Pasivos y Activos")
-            st.plotly_chart(fig_pie, use_container_width=True)
+# ── 3. Sidebar: branding + status (visible en todas las páginas) ───────────────
+with st.sidebar:
+    st.markdown("### 📊 Gestor ALM")
 
-        # --- PESTAÑA 2: SETTLEMENT SCHEDULE ---
-        st.header("2. Proyección de Liquidez (Cash Flow Matching)")
-        df_flujos_desc = df_flujos.merge(df_pos[['ID_Posicion', 'Descripcion']], on='ID_Posicion', how='left')
-        flujo_mensual = df_flujos_desc.groupby('Fecha_Settlement')['Flujo_Caja_Total'].sum().reset_index()
-        
-        col3, col4 = st.columns([2, 1])
-        
-        with col3:
-            fig_bar = px.bar(flujo_mensual, x='Fecha_Settlement', y='Flujo_Caja_Total', 
-                             title="Flujo de Caja Neto Proyectado por Mes",
-                             labels={'Flujo_Caja_Total': 'Liquidez Neta (CLP)'},
-                             color='Flujo_Caja_Total', color_continuous_scale='RdYlGn')
-            st.plotly_chart(fig_bar, use_container_width=True)
-            
-        with col4:
-            st.subheader("Detalle de Desarrollo")
-            mes_seleccionado = st.selectbox("Selecciona un mes para ver detalle:", df_flujos_desc['Fecha_Settlement'].unique())
-            detalle_mes = df_flujos_desc[df_flujos_desc['Fecha_Settlement'] == mes_seleccionado]
-            st.dataframe(detalle_mes[['Descripcion', 'Flujo_Caja_Total']], use_container_width=True)
-            
+    lbl = state.status_label()
+    if "Sincronizado" in lbl:
+        st.success(lbl)
+    elif "Cambios" in lbl:
+        st.warning(lbl)
     else:
-        st.warning("No se encontraron los archivos en tu Google Drive. Revisa que los nombres sean exactos.")
+        st.caption(lbl)
 
-except Exception as e:
-    st.error(f"Error de conexión: {e}")
+    st.divider()
+
+    if onboarding_done:
+        nombre = st.session_state.get("nombre_usuario", "")
+        if nombre:
+            st.caption(f"👤 {nombre}")
+        st.caption(f"Capa desbloqueada: **{layer} / 4**")
+
+# ── 4. Lista de páginas según estado ──────────────────────────────────────────
+if not onboarding_done:
+    _pages = [
+        st.Page(
+            "pages/01_onboarding.py",
+            title="Bienvenido",
+            icon="👋",
+            default=True,
+        ),
+    ]
+else:
+    _pages = [
+        st.Page(
+            "pages/02_capa1_claridad.py",
+            title="Mi Resumen",
+            icon="🏠",
+            default=True,
+        ),
+    ]
+    if layer >= 2:
+        _pages.append(
+            st.Page(
+                "pages/03_capa2_control.py",
+                title="Mis Compromisos",
+                icon="📋",
+            )
+        )
+    if layer >= 3:
+        _pages.append(
+            st.Page(
+                "pages/04_capa3_crecimiento.py",
+                title="Mi Crecimiento",
+                icon="📈",
+            )
+        )
+    if layer >= 4:
+        _pages.append(
+            st.Page(
+                "pages/05_capa4_pro.py",
+                title="Modo Pro",
+                icon="🏛️",
+            )
+        )
+
+# ── 5. Navegación ──────────────────────────────────────────────────────────────
+pg = st.navigation(_pages, position="sidebar")
+
+# CSS: simular layout="centered" durante el onboarding (app usa "wide")
+if not onboarding_done:
+    st.markdown(
+        """
+        <style>
+        section.main > div.block-container {
+            max-width: 780px;
+            padding-left: 2rem;
+            padding-right: 2rem;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# ── 6. Ejecutar la página activa ──────────────────────────────────────────────
+pg.run()

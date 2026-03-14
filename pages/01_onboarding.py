@@ -19,18 +19,10 @@ import plotly.graph_objects as go
 
 from core import calculator, state
 
-# ── Configuración ─────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Bienvenido · Gestor ALM",
-    page_icon="📊",
-    layout="centered",
-)
-
+# ── Inicialización ─────────────────────────────────────────────────────────────
+# set_page_config() se llama una sola vez en app.py (entrada principal).
+# El layout centrado se inyecta vía CSS desde app.py cuando el onboarding está activo.
 state.init_session_state()
-
-# Si ya completó el onboarding, redirige al dashboard
-if st.session_state.get("onboarding_complete", False):
-    st.switch_page("app.py")
 
 # ── Inicializar claves temporales del onboarding ──────────────────────────────
 _OB_DEFAULTS: dict = {
@@ -608,7 +600,8 @@ def _finalizar_onboarding() -> None:
     st.session_state["onboarding_complete"] = True
     state.update_layer()
 
-    st.switch_page("app.py")
+    # st.navigation() en app.py verá onboarding_complete=True y mostrará el dashboard.
+    st.rerun()
 
 
 # ── Router ────────────────────────────────────────────────────────────────────
