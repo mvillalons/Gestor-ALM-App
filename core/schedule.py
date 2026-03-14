@@ -230,6 +230,409 @@ def _tabla_frances(
     return rows
 
 
+# ---------------------------------------------------------------------------
+# Generación de tabla de desarrollo — Crédito consumo
+# ---------------------------------------------------------------------------
+
+
+def gen_credito_consumo(
+    monto: float,
+    n_cuotas: int,
+    tasa_anual: float,
+    fecha_primer_pago: date | str,
+    moneda: str = "CLP",
+    id_posicion: str = "",
+) -> pd.DataFrame:
+    """Genera la tabla de desarrollo mensual de un crédito de consumo.
+
+    Aplica el mismo método francés (cuota fija) que :func:`gen_hipotecario`.
+
+    Args:
+        monto: Monto total del crédito. Debe ser > 0.
+        n_cuotas: Número de cuotas mensuales. Debe ser > 0.
+        tasa_anual: Tasa de interés anual como decimal (p. ej. 0.12 = 12 %).
+            Puede ser 0 (crédito sin interés).
+        fecha_primer_pago: Mes de la primera cuota.
+        moneda: Código de moneda (``"CLP"``, ``"UF"``, ``"USD"``, …).
+        id_posicion: ID de la posición para poblar la columna ``ID_Posicion``.
+
+    Returns:
+        :class:`pandas.DataFrame` con columnas estándar de tabla de desarrollo.
+        Contiene exactamente ``n_cuotas`` filas.
+
+    Raises:
+        ValueError: Si algún parámetro es inválido.
+    """
+    if monto <= 0:
+        raise ValueError(f"monto debe ser mayor que cero, se recibió {monto}.")
+    if n_cuotas <= 0:
+        raise ValueError(f"n_cuotas debe ser mayor que cero, se recibió {n_cuotas}.")
+    if tasa_anual < 0:
+        raise ValueError(f"tasa_anual no puede ser negativa, se recibió {tasa_anual}.")
+
+    tasa_mensual: float = tasa_anual / 12
+    fecha: date = _parse_fecha(fecha_primer_pago)
+    rows = _tabla_frances(monto, tasa_mensual, n_cuotas, fecha, moneda, id_posicion)
+    return pd.DataFrame(rows, columns=COLS_TABLA_DESARROLLO)
+
+
+# ---------------------------------------------------------------------------
+# Generación de tabla de desarrollo — Colegio / cuotas educacionales
+# ---------------------------------------------------------------------------
+
+
+def gen_colegio(
+    monto_anual: float,
+    cuotas_por_ano: int,
+    anos_restantes: int,
+    meses_de_pago: list[int],
+    fecha_inicio: date | str,
+    moneda: str = "CLP",
+    id_posicion: str = "",
+) -> pd.DataFrame:
+    """Genera la tabla de desarrollo para compromisos de colegio o arancel educacional.
+
+    Los pagos se distribuyen en los meses indicados por ``meses_de_pago``,
+    durante ``anos_restantes`` años calendario comenzando desde ``fecha_inicio``.
+    Solo se generan filas para meses >= ``fecha_inicio``.
+
+    El saldo de cada fila representa el compromiso monetario futuro restante.
+
+    Args:
+        monto_anual: Monto total anual del compromiso. Debe ser > 0.
+        cuotas_por_ano: Número de cuotas que se pagan por año. Debe ser > 0
+            y <= ``len(meses_de_pago)``.
+        anos_restantes: Número de años calendario con pagos pendientes
+            (incluyendo el año de inicio si aún quedan pagos). Debe ser > 0.
+        meses_de_pago: Lista con los números de mes (1–12) en que se realizan
+            los pagos cada año. Se toman los primeros ``cuotas_por_ano`` meses
+            en orden ascendente.
+        fecha_inicio: Fecha desde la cual se generan filas (inclusive).
+        moneda: Código de moneda.
+        id_posicion: ID de la posición.
+
+    Returns:
+        :class:`pandas.DataFrame` con columnas estándar. Puede tener menos
+        filas que ``cuotas_por_ano * anos_restantes`` si algunos meses del
+        primer año caen antes de ``fecha_inicio``.
+        Retorna DataFrame vacío si no hay pagos futuros.
+
+    Raises:
+        ValueError: Si algún parámetro es inválido.
+    """
+    if monto_anual <= 0:
+        raise ValueError(
+            f"monto_anual debe ser mayor que cero, se recibió {monto_anual}."
+        )
+    if cuotas_por_ano <= 0:
+        raise ValueError(
+            f"cuotas_por_ano debe ser mayor que cero, se recibió {cuotas_por_ano}."
+        )
+    if not meses_de_pago:
+        raise ValueError("meses_de_pago no puede estar vacío.")
+    if cuotas_por_ano > len(meses_de_pago):
+        raise ValueError(
+            f"cuotas_por_ano ({cuotas_por_ano}) no puede superar "
+            f"len(meses_de_pago) ({len(meses_de_pago)})."
+        )
+    if anos_restantes <= 0:
+        raise ValueError(
+            f"anos_restantes debe ser mayor que cero, se recibió {anos_restantes}."
+        )
+
+    fecha: date = _parse_fecha(fecha_inicio)
+    cuota: float = monto_anual / cuotas_por_ano
+    meses_sorted: list[int] = sorted(meses_de_pago)[:cuotas_por_ano]
+
+    # Recopilar todas las fechas de pago futuras (>= fecha)
+    fechas_pago: list[date] = []
+    for offset in range(anos_restantes):
+        anio = fecha.year + offset
+        for mes in meses_sorted:
+            d = date(anio, mes, 1)
+            if d >= fecha:
+                fechas_pago.append(d)
+
+    if not fechas_pago:
+        return pd.DataFrame(columns=COLS_TABLA_DESARROLLO)
+
+    # El saldo inicial de la primera fila = compromiso total futuro
+    saldo: float = round(len(fechas_pago) * cuota, 6)
+    rows: list[dict] = []
+
+    for i, d in enumerate(fechas_pago):
+        saldo_ini = saldo
+        saldo_final = round(saldo_ini - cuota, 6)
+        rows.append(
+            {
+                "ID_Posicion": id_posicion,
+                "Periodo": d.strftime("%Y-%m"),
+                "Saldo_Inicial": round(saldo_ini, 6),
+                "Flujo_Periodo": round(-cuota, 6),
+                "Rendimiento_Costo": 0.0,
+                "Amortizacion": round(cuota, 6),
+                "Saldo_Final": saldo_final,
+                "Moneda": moneda,
+                "Tipo_Flujo": "calculado",
+                "Notas": (
+                    f"Cuota colegio {d.year} "
+                    f"({i % cuotas_por_ano + 1}/{cuotas_por_ano})"
+                ),
+            }
+        )
+        saldo = saldo_final
+
+    return pd.DataFrame(rows, columns=COLS_TABLA_DESARROLLO)
+
+
+# ---------------------------------------------------------------------------
+# Generación de tabla de desarrollo — Tarjeta de crédito
+# ---------------------------------------------------------------------------
+
+
+def gen_tarjeta(
+    deuda_total: float,
+    pago_mensual: float,
+    tasa_mensual: float,
+    fecha_inicio: date | str,
+    moneda: str = "CLP",
+    id_posicion: str = "",
+    max_meses: int = 360,
+) -> pd.DataFrame:
+    """Genera la tabla de desarrollo para deuda de tarjeta de crédito.
+
+    Calcula un plan de amortización con cuota fija mensual sobre un saldo
+    inicial, con la tasa mensual indicada. Se detiene cuando el saldo llega
+    a cero o se alcanza ``max_meses``.
+
+    Convención de signos:
+        - ``Flujo_Periodo`` negativo (egreso del usuario).
+        - ``Rendimiento_Costo`` negativo (costo financiero).
+        - ``Amortizacion`` positiva (capital amortizado).
+
+    Args:
+        deuda_total: Saldo deudor actual. Debe ser > 0.
+        pago_mensual: Monto a pagar cada mes. Debe ser mayor que los intereses
+            del primer período para que la deuda se amortice efectivamente.
+        tasa_mensual: Tasa de interés mensual como decimal (p. ej. 0.02 = 2 %).
+            Puede ser 0 (sin interés).
+        fecha_inicio: Mes del primer pago.
+        moneda: Código de moneda.
+        id_posicion: ID de la posición.
+        max_meses: Tope de iteraciones para evitar ciclos infinitos (defecto 360).
+
+    Returns:
+        :class:`pandas.DataFrame` con columnas estándar de tabla de desarrollo.
+
+    Raises:
+        ValueError: Si algún parámetro es inválido o el pago no cubre los
+            intereses del primer período.
+    """
+    if deuda_total <= 0:
+        raise ValueError(
+            f"deuda_total debe ser mayor que cero, se recibió {deuda_total}."
+        )
+    if pago_mensual <= 0:
+        raise ValueError(
+            f"pago_mensual debe ser mayor que cero, se recibió {pago_mensual}."
+        )
+    if tasa_mensual < 0:
+        raise ValueError(
+            f"tasa_mensual no puede ser negativa, se recibió {tasa_mensual}."
+        )
+
+    interes_inicial = deuda_total * tasa_mensual
+    if tasa_mensual > 0 and pago_mensual <= interes_inicial:
+        raise ValueError(
+            f"pago_mensual ({pago_mensual:,.2f}) debe ser mayor que el interés "
+            f"inicial ({interes_inicial:,.2f}) para amortizar la deuda."
+        )
+
+    fecha: date = _parse_fecha(fecha_inicio)
+    saldo: float = deuda_total
+    nota = (
+        f"Pago mensual {moneda} {pago_mensual:,.0f} | "
+        f"tasa mensual {tasa_mensual * 100:.2f}%"
+    )
+    rows: list[dict] = []
+
+    for _ in range(max_meses):
+        if saldo <= 0.01:
+            break
+        saldo_ini = saldo
+        interes = saldo_ini * tasa_mensual
+        pago = min(pago_mensual, saldo_ini + interes)
+        amort = pago - interes
+        saldo = max(saldo_ini - amort, 0.0)
+
+        rows.append(
+            {
+                "ID_Posicion": id_posicion,
+                "Periodo": fecha.strftime("%Y-%m"),
+                "Saldo_Inicial": round(saldo_ini, 6),
+                "Flujo_Periodo": round(-pago, 6),
+                "Rendimiento_Costo": round(-interes, 6),
+                "Amortizacion": round(amort, 6),
+                "Saldo_Final": round(saldo, 6),
+                "Moneda": moneda,
+                "Tipo_Flujo": "calculado",
+                "Notas": nota,
+            }
+        )
+        fecha = _next_month(fecha)
+
+    return pd.DataFrame(rows, columns=COLS_TABLA_DESARROLLO)
+
+
+# ---------------------------------------------------------------------------
+# Generación de tabla de desarrollo — AFP
+# ---------------------------------------------------------------------------
+
+
+def gen_afp(
+    saldo_actual: float,
+    aporte_mensual: float,
+    tasa_anual: float,
+    edad_actual: float,
+    edad_jubilacion: float,
+    fecha_inicio: date | str,
+    moneda: str = "CLP",
+    id_posicion: str = "",
+) -> pd.DataFrame:
+    """Genera la proyección mensual del saldo AFP hasta la jubilación.
+
+    El saldo crece cada mes por rentabilidad (``tasa_anual / 12``) y por el
+    aporte mensual. Convención de signos:
+        - ``Flujo_Periodo`` negativo (el aporte es un egreso del usuario).
+        - ``Rendimiento_Costo`` positivo (crecimiento del fondo).
+        - ``Saldo_Final`` crece con el tiempo.
+
+    Args:
+        saldo_actual: Saldo AFP al inicio de la proyección. Debe ser >= 0.
+        aporte_mensual: Aporte mensual obligatorio + voluntario. Debe ser >= 0.
+        tasa_anual: Rentabilidad anual esperada del fondo como decimal.
+            Puede ser 0 (sin rentabilidad).
+        edad_actual: Edad actual del afiliado en años (acepta decimales).
+        edad_jubilacion: Edad de jubilación objetivo. Debe ser > ``edad_actual``.
+        fecha_inicio: Mes del primer aporte proyectado.
+        moneda: Código de moneda (típicamente ``"CLP"``).
+        id_posicion: ID de la posición.
+
+    Returns:
+        :class:`pandas.DataFrame` con columnas estándar.
+        Número de filas = ``round((edad_jubilacion - edad_actual) * 12)``.
+
+    Raises:
+        ValueError: Si los parámetros son inválidos.
+    """
+    if saldo_actual < 0:
+        raise ValueError(
+            f"saldo_actual no puede ser negativo, se recibió {saldo_actual}."
+        )
+    if aporte_mensual < 0:
+        raise ValueError(
+            f"aporte_mensual no puede ser negativo, se recibió {aporte_mensual}."
+        )
+    if tasa_anual < 0:
+        raise ValueError(
+            f"tasa_anual no puede ser negativa, se recibió {tasa_anual}."
+        )
+    if edad_jubilacion <= edad_actual:
+        raise ValueError(
+            f"edad_jubilacion ({edad_jubilacion}) debe ser mayor que "
+            f"edad_actual ({edad_actual})."
+        )
+
+    plazo: int = max(1, round((edad_jubilacion - edad_actual) * 12))
+    tasa_mensual: float = tasa_anual / 12
+    fecha: date = _parse_fecha(fecha_inicio)
+    saldo: float = float(saldo_actual)
+    nota = (
+        f"Aporte {moneda} {aporte_mensual:,.0f} | "
+        f"rentabilidad {tasa_anual * 100:.1f}% anual"
+    )
+    rows: list[dict] = []
+
+    for _ in range(plazo):
+        saldo_ini = saldo
+        rendimiento = round(saldo_ini * tasa_mensual, 2)
+        saldo = round(saldo_ini + rendimiento + aporte_mensual, 2)
+
+        rows.append(
+            {
+                "ID_Posicion": id_posicion,
+                "Periodo": fecha.strftime("%Y-%m"),
+                "Saldo_Inicial": saldo_ini,
+                "Flujo_Periodo": round(-aporte_mensual, 2),  # egreso del usuario
+                "Rendimiento_Costo": rendimiento,             # positivo: crecimiento
+                "Amortizacion": 0.0,
+                "Saldo_Final": saldo,
+                "Moneda": moneda,
+                "Tipo_Flujo": "calculado",
+                "Notas": nota,
+            }
+        )
+        fecha = _next_month(fecha)
+
+    return pd.DataFrame(rows, columns=COLS_TABLA_DESARROLLO)
+
+
+# ---------------------------------------------------------------------------
+# Análisis consolidado — flujo neto mensual
+# ---------------------------------------------------------------------------
+
+
+def flujo_neto_mensual(
+    tablas: list[pd.DataFrame],
+    ingreso_mensual: float,
+) -> pd.DataFrame:
+    """Consolida el flujo neto mensual sumando pagos de pasivos e ingreso.
+
+    Agrega los ``Flujo_Periodo`` de todas las tablas proporcionadas (negativos
+    para pasivos) y los combina con el ingreso mensual constante del usuario.
+
+    Args:
+        tablas: Lista de DataFrames de tablas de desarrollo.
+            Cada uno debe tener las columnas ``Periodo`` y ``Flujo_Periodo``.
+        ingreso_mensual: Ingreso mensual del usuario (constante en todo el
+            horizonte). Debe ser >= 0.
+
+    Returns:
+        :class:`pandas.DataFrame` con columnas:
+            - ``Periodo`` (YYYY-MM, ordenado ascendente)
+            - ``Flujo_Pasivos`` (suma de pagos, negativo para deudas)
+            - ``Ingreso`` (= ``ingreso_mensual`` para todos los períodos)
+            - ``Flujo_Neto`` (= ``Ingreso`` + ``Flujo_Pasivos``)
+
+        Retorna DataFrame vacío (con las columnas) si ``tablas`` está vacío.
+
+    Raises:
+        ValueError: Si ``ingreso_mensual`` es negativo.
+    """
+    _cols_out = ["Periodo", "Flujo_Pasivos", "Ingreso", "Flujo_Neto"]
+
+    if ingreso_mensual < 0:
+        raise ValueError(
+            f"ingreso_mensual no puede ser negativo, se recibió {ingreso_mensual}."
+        )
+
+    if not tablas:
+        return pd.DataFrame(columns=_cols_out)
+
+    combined = pd.concat(
+        [t[["Periodo", "Flujo_Periodo"]].copy() for t in tablas],
+        ignore_index=True,
+    )
+    grouped = (
+        combined.groupby("Periodo", sort=True)["Flujo_Periodo"]
+        .sum()
+        .reset_index()
+        .rename(columns={"Flujo_Periodo": "Flujo_Pasivos"})
+    )
+    grouped["Ingreso"] = ingreso_mensual
+    grouped["Flujo_Neto"] = grouped["Ingreso"] + grouped["Flujo_Pasivos"]
+
+    return grouped[_cols_out].reset_index(drop=True)
 def _tabla_aleman(
     capital: float,
     tasa_mensual: float,

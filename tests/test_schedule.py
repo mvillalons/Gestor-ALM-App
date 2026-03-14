@@ -1,11 +1,19 @@
-"""Tests para core/schedule.py — gen_hipotecario."""
+"""Tests para core/schedule.py — todas las funciones de generación de tablas."""
 
 from datetime import date
 
 import pandas as pd
 import pytest
 
-from core.schedule import COLS_TABLA_DESARROLLO, gen_hipotecario
+from core.schedule import (
+    COLS_TABLA_DESARROLLO,
+    flujo_neto_mensual,
+    gen_afp,
+    gen_colegio,
+    gen_credito_consumo,
+    gen_hipotecario,
+    gen_tarjeta,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -218,3 +226,482 @@ class TestValidaciones:
     def test_fecha_formato_invalido(self):
         with pytest.raises((ValueError, IndexError)):
             gen_hipotecario(CAPITAL, TASA_ANUAL, PLAZO, "26/04/2026")
+
+
+# ===========================================================================
+# gen_credito_consumo
+# ===========================================================================
+
+
+class TestGenCreditoConsumo:
+    """Crédito de consumo — método francés."""
+
+    MONTO = 5_000_000
+    N_CUOTAS = 24
+    TASA = 0.12  # 12 % anual
+    FECHA = date(2026, 4, 1)
+
+    def _df(self, **kwargs):
+        return gen_credito_consumo(
+            self.MONTO, self.N_CUOTAS, self.TASA, self.FECHA, **kwargs
+        )
+
+    # Estructura
+    def test_columnas_estandar(self):
+        assert list(self._df().columns) == COLS_TABLA_DESARROLLO
+
+    def test_numero_filas(self):
+        assert len(self._df()) == self.N_CUOTAS
+
+    def test_tipo_flujo_calculado(self):
+        assert (self._df()["Tipo_Flujo"] == "calculado").all()
+
+    def test_id_posicion_propagado(self):
+        df = gen_credito_consumo(
+            self.MONTO, self.N_CUOTAS, self.TASA, self.FECHA, id_posicion="PAS_CON_001"
+        )
+        assert (df["ID_Posicion"] == "PAS_CON_001").all()
+
+    # Invariantes financieros
+    def test_saldo_final_cero(self):
+        assert abs(self._df()["Saldo_Final"].iloc[-1]) < 1e-4
+
+    def test_total_amortizado_igual_monto(self):
+        assert abs(self._df()["Amortizacion"].sum() - self.MONTO) < 1e-2
+
+    def test_flujo_negativo(self):
+        assert (self._df()["Flujo_Periodo"] < 0).all()
+
+    def test_saldo_decreciente(self):
+        assert (self._df()["Saldo_Final"].diff().dropna() < 0).all()
+
+    def test_continuidad_saldos(self):
+        df = self._df()
+        assert all(
+            abs(a - b) < 1e-4
+            for a, b in zip(df["Saldo_Final"].values[:-1], df["Saldo_Inicial"].values[1:])
+        )
+
+    def test_tasa_cero_cuota_igual_monto_dividido_n(self):
+        df = gen_credito_consumo(self.MONTO, 12, 0.0, self.FECHA)
+        cuotas = df["Flujo_Periodo"].abs()
+        assert abs(cuotas.mean() - self.MONTO / 12) < 1e-4
+
+    # Validaciones
+    def test_monto_cero_falla(self):
+        with pytest.raises(ValueError, match="monto"):
+            gen_credito_consumo(0, self.N_CUOTAS, self.TASA, self.FECHA)
+
+    def test_n_cuotas_cero_falla(self):
+        with pytest.raises(ValueError, match="n_cuotas"):
+            gen_credito_consumo(self.MONTO, 0, self.TASA, self.FECHA)
+
+    def test_tasa_negativa_falla(self):
+        with pytest.raises(ValueError, match="tasa_anual"):
+            gen_credito_consumo(self.MONTO, self.N_CUOTAS, -0.01, self.FECHA)
+
+
+# ===========================================================================
+# gen_colegio
+# ===========================================================================
+
+
+class TestGenColegio:
+    """Colegio — cuotas en meses específicos del año."""
+
+    MONTO = 2_400_000     # anual
+    CUOTAS = 10
+    ANOS = 2
+    MESES = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    FECHA = date(2026, 3, 1)
+
+    def _df(self, **kwargs):
+        return gen_colegio(
+            self.MONTO, self.CUOTAS, self.ANOS, self.MESES, self.FECHA, **kwargs
+        )
+
+    # Estructura
+    def test_columnas_estandar(self):
+        assert list(self._df().columns) == COLS_TABLA_DESARROLLO
+
+    def test_numero_filas_completo(self):
+        """Cuando fecha_inicio coincide con el primer mes de pago."""
+        assert len(self._df()) == self.CUOTAS * self.ANOS
+
+    def test_tipo_flujo_calculado(self):
+        assert (self._df()["Tipo_Flujo"] == "calculado").all()
+
+    def test_id_posicion_propagado(self):
+        df = gen_colegio(
+            self.MONTO, self.CUOTAS, self.ANOS, self.MESES,
+            self.FECHA, id_posicion="PAS_COL_001"
+        )
+        assert (df["ID_Posicion"] == "PAS_COL_001").all()
+
+    def test_moneda_propagada(self):
+        df = gen_colegio(self.MONTO, self.CUOTAS, self.ANOS, self.MESES, self.FECHA, moneda="UF")
+        assert (df["Moneda"] == "UF").all()
+
+    # Invariantes financieros
+    def test_cuota_constante(self):
+        """Cada cuota debe ser monto_anual / cuotas_por_ano."""
+        cuota_esperada = self.MONTO / self.CUOTAS
+        df = self._df()
+        assert all(abs(v - cuota_esperada) < 1e-4 for v in df["Amortizacion"])
+
+    def test_flujo_negativo(self):
+        assert (self._df()["Flujo_Periodo"] < 0).all()
+
+    def test_saldo_final_cero(self):
+        assert abs(self._df()["Saldo_Final"].iloc[-1]) < 1e-4
+
+    def test_rendimiento_cero(self):
+        """Colegio no tiene interés."""
+        assert (self._df()["Rendimiento_Costo"] == 0).all()
+
+    def test_saldo_decreciente(self):
+        assert (self._df()["Saldo_Final"].diff().dropna() < 0).all()
+
+    def test_solo_meses_de_pago(self):
+        """Las filas solo deben tener períodos en los meses seleccionados."""
+        df = self._df()
+        meses_en_tabla = {int(p.split("-")[1]) for p in df["Periodo"]}
+        assert meses_en_tabla.issubset(set(self.MESES))
+
+    def test_fecha_inicio_filtra_meses_pasados(self):
+        """Si inicio es mayo, los meses de marzo y abril del año 1 se omiten."""
+        fecha_mayo = date(2026, 5, 1)
+        df = gen_colegio(self.MONTO, self.CUOTAS, 1, self.MESES, fecha_mayo)
+        # Solo meses >= 5 en el primer año (5,6,7,8,9,10,11,12) → 8 filas
+        assert len(df) == 8
+
+    def test_cuotas_por_ano_limita_meses_usados(self):
+        """Si cuotas_por_ano < len(meses), solo se usan los primeros N meses."""
+        df = gen_colegio(1_000_000, 3, 1, [1, 3, 5, 7, 9, 11], date(2026, 1, 1))
+        assert len(df) == 3
+        meses_usados = sorted({int(p.split("-")[1]) for p in df["Periodo"]})
+        assert meses_usados == [1, 3, 5]  # primeros 3 en orden
+
+    # Validaciones
+    def test_monto_cero_falla(self):
+        with pytest.raises(ValueError, match="monto_anual"):
+            gen_colegio(0, self.CUOTAS, self.ANOS, self.MESES, self.FECHA)
+
+    def test_cuotas_mayor_que_meses_falla(self):
+        with pytest.raises(ValueError):
+            gen_colegio(self.MONTO, 11, self.ANOS, self.MESES, self.FECHA)
+
+    def test_anos_cero_falla(self):
+        with pytest.raises(ValueError, match="anos_restantes"):
+            gen_colegio(self.MONTO, self.CUOTAS, 0, self.MESES, self.FECHA)
+
+    def test_meses_vacio_falla(self):
+        with pytest.raises(ValueError, match="vac"):
+            gen_colegio(self.MONTO, self.CUOTAS, self.ANOS, [], self.FECHA)
+
+    def test_sin_pagos_futuros_retorna_vacio(self):
+        """Si todos los meses de pago caen antes de fecha_inicio en el único año → vacío."""
+        # Meses 1 y 2 (enero y febrero), inicio en marzo del mismo año con 1 solo año.
+        # Enero y febrero < marzo → se omiten; no quedan filas.
+        df = gen_colegio(self.MONTO, 2, 1, [1, 2], date(2026, 3, 1))
+        assert df.empty
+
+
+# ===========================================================================
+# gen_tarjeta
+# ===========================================================================
+
+
+class TestGenTarjeta:
+    """Tarjeta de crédito — saldo decreciente con pago mensual fijo."""
+
+    DEUDA = 1_000_000
+    PAGO = 150_000
+    TASA_M = 0.02  # 2 % mensual
+    FECHA = date(2026, 4, 1)
+
+    def _df(self, **kwargs):
+        return gen_tarjeta(self.DEUDA, self.PAGO, self.TASA_M, self.FECHA, **kwargs)
+
+    # Estructura
+    def test_columnas_estandar(self):
+        assert list(self._df().columns) == COLS_TABLA_DESARROLLO
+
+    def test_tipo_flujo_calculado(self):
+        assert (self._df()["Tipo_Flujo"] == "calculado").all()
+
+    def test_id_posicion_propagado(self):
+        df = gen_tarjeta(
+            self.DEUDA, self.PAGO, self.TASA_M, self.FECHA, id_posicion="PAS_TAR_001"
+        )
+        assert (df["ID_Posicion"] == "PAS_TAR_001").all()
+
+    # Invariantes financieros
+    def test_saldo_final_cero(self):
+        """El saldo termina en cero."""
+        assert abs(self._df()["Saldo_Final"].iloc[-1]) < 0.02
+
+    def test_saldo_decreciente(self):
+        """El saldo baja cada mes."""
+        df = self._df()
+        assert (df["Saldo_Final"].diff().dropna() < 0).all()
+
+    def test_flujo_negativo(self):
+        assert (self._df()["Flujo_Periodo"] < 0).all()
+
+    def test_interes_negativo(self):
+        assert (self._df()["Rendimiento_Costo"] <= 0).all()
+
+    def test_amortizacion_positiva(self):
+        assert (self._df()["Amortizacion"] > 0).all()
+
+    def test_continuidad_saldos(self):
+        df = self._df()
+        assert all(
+            abs(a - b) < 1e-4
+            for a, b in zip(df["Saldo_Final"].values[:-1], df["Saldo_Inicial"].values[1:])
+        )
+
+    def test_total_amortizado_igual_deuda(self):
+        assert abs(self._df()["Amortizacion"].sum() - self.DEUDA) < 0.02
+
+    def test_ultimo_pago_ajustado(self):
+        """La última cuota puede ser menor que el pago habitual."""
+        df = self._df()
+        ultimo_flujo = abs(float(df["Flujo_Periodo"].iloc[-1]))
+        assert ultimo_flujo <= self.PAGO + 1e-4
+
+    def test_tasa_cero_pago_divide_deuda(self):
+        """Con 0% de interés, cada pago amortiza exactamente hasta llegar a 0."""
+        df = gen_tarjeta(1_000_000, 200_000, 0.0, self.FECHA)
+        assert len(df) == 5  # 1_000_000 / 200_000
+        assert (df["Rendimiento_Costo"] == 0).all()
+        assert abs(df["Saldo_Final"].iloc[-1]) < 1e-4
+
+    def test_max_meses_limita_iteraciones(self):
+        """max_meses evita ciclos infinitos si el pago es muy bajo."""
+        # Pago apenas por encima del interés → converge lento; max_meses lo corta
+        deuda = 1_000_000
+        tasa_m = 0.02
+        # pago = interes_inicial + 1 CLP
+        pago_minimo = deuda * tasa_m + 1
+        df = gen_tarjeta(deuda, pago_minimo, tasa_m, self.FECHA, max_meses=10)
+        assert len(df) <= 10
+
+    # Validaciones
+    def test_deuda_cero_falla(self):
+        with pytest.raises(ValueError, match="deuda_total"):
+            gen_tarjeta(0, self.PAGO, self.TASA_M, self.FECHA)
+
+    def test_pago_cero_falla(self):
+        with pytest.raises(ValueError, match="pago_mensual"):
+            gen_tarjeta(self.DEUDA, 0, self.TASA_M, self.FECHA)
+
+    def test_tasa_negativa_falla(self):
+        with pytest.raises(ValueError, match="tasa_mensual"):
+            gen_tarjeta(self.DEUDA, self.PAGO, -0.01, self.FECHA)
+
+    def test_pago_insuficiente_falla(self):
+        """Pago menor o igual al interés inicial → no amortiza → error."""
+        interes = self.DEUDA * self.TASA_M
+        with pytest.raises(ValueError, match="pago_mensual"):
+            gen_tarjeta(self.DEUDA, interes, self.TASA_M, self.FECHA)
+
+
+# ===========================================================================
+# gen_afp
+# ===========================================================================
+
+
+class TestGenAfp:
+    """Proyección AFP — acumulación hasta jubilación."""
+
+    SALDO = 10_000_000
+    APORTE = 150_000
+    TASA = 0.05   # 5 % anual
+    EDAD_ACT = 35.0
+    EDAD_JUB = 65.0
+    FECHA = date(2026, 4, 1)
+
+    def _df(self, **kwargs):
+        return gen_afp(
+            self.SALDO, self.APORTE, self.TASA,
+            self.EDAD_ACT, self.EDAD_JUB, self.FECHA, **kwargs
+        )
+
+    # Estructura
+    def test_columnas_estandar(self):
+        assert list(self._df().columns) == COLS_TABLA_DESARROLLO
+
+    def test_numero_filas(self):
+        """30 años * 12 meses = 360 filas."""
+        assert len(self._df()) == round((self.EDAD_JUB - self.EDAD_ACT) * 12)
+
+    def test_tipo_flujo_calculado(self):
+        assert (self._df()["Tipo_Flujo"] == "calculado").all()
+
+    def test_id_posicion_propagado(self):
+        df = gen_afp(
+            self.SALDO, self.APORTE, self.TASA,
+            self.EDAD_ACT, self.EDAD_JUB, self.FECHA, id_posicion="AFP_PRINCIPAL"
+        )
+        assert (df["ID_Posicion"] == "AFP_PRINCIPAL").all()
+
+    def test_moneda_propagada(self):
+        df = gen_afp(
+            self.SALDO, self.APORTE, self.TASA,
+            self.EDAD_ACT, self.EDAD_JUB, self.FECHA, moneda="CLP"
+        )
+        assert (df["Moneda"] == "CLP").all()
+
+    # Invariantes financieros
+    def test_saldo_creciente(self):
+        """El saldo AFP debe crecer cada mes."""
+        df = self._df()
+        assert (df["Saldo_Final"].diff().dropna() > 0).all()
+
+    def test_saldo_inicial_primera_fila(self):
+        assert abs(self._df()["Saldo_Inicial"].iloc[0] - self.SALDO) < 1.0
+
+    def test_flujo_periodo_negativo(self):
+        """El aporte es un egreso del usuario → Flujo_Periodo negativo."""
+        df = self._df()
+        assert (df["Flujo_Periodo"] <= 0).all()
+
+    def test_rendimiento_positivo(self):
+        """El rendimiento es positivo (crecimiento del fondo)."""
+        df = self._df()
+        assert (df["Rendimiento_Costo"] >= 0).all()
+
+    def test_continuidad_saldos(self):
+        df = self._df()
+        assert all(
+            abs(a - b) < 1.0
+            for a, b in zip(df["Saldo_Final"].values[:-1], df["Saldo_Inicial"].values[1:])
+        )
+
+    def test_tasa_cero_sin_rendimiento(self):
+        """Con 0% de rentabilidad, saldo crece solo por aportes."""
+        df = gen_afp(
+            self.SALDO, self.APORTE, 0.0, self.EDAD_ACT, self.EDAD_JUB, self.FECHA
+        )
+        plazo = round((self.EDAD_JUB - self.EDAD_ACT) * 12)
+        saldo_esperado = self.SALDO + self.APORTE * plazo
+        assert abs(df["Saldo_Final"].iloc[-1] - saldo_esperado) < 1.0
+        assert (df["Rendimiento_Costo"] == 0).all()
+
+    def test_saldo_inicial_cero_funciona(self):
+        """Permite saldo actual = 0."""
+        df = gen_afp(0, self.APORTE, self.TASA, self.EDAD_ACT, self.EDAD_JUB, self.FECHA)
+        assert df["Saldo_Final"].iloc[-1] > 0
+
+    def test_aporte_cero_solo_rentabilidad(self):
+        """Con aporte = 0, el saldo crece solo por rendimiento."""
+        df = gen_afp(
+            self.SALDO, 0, self.TASA, self.EDAD_ACT, self.EDAD_JUB, self.FECHA
+        )
+        assert (df["Flujo_Periodo"] == 0).all()
+        assert (df["Rendimiento_Costo"] > 0).all()
+
+    # Validaciones
+    def test_saldo_negativo_falla(self):
+        with pytest.raises(ValueError, match="saldo_actual"):
+            gen_afp(-1, self.APORTE, self.TASA, self.EDAD_ACT, self.EDAD_JUB, self.FECHA)
+
+    def test_aporte_negativo_falla(self):
+        with pytest.raises(ValueError, match="aporte_mensual"):
+            gen_afp(self.SALDO, -1, self.TASA, self.EDAD_ACT, self.EDAD_JUB, self.FECHA)
+
+    def test_tasa_negativa_falla(self):
+        with pytest.raises(ValueError, match="tasa_anual"):
+            gen_afp(self.SALDO, self.APORTE, -0.01, self.EDAD_ACT, self.EDAD_JUB, self.FECHA)
+
+    def test_edad_jubilacion_menor_que_actual_falla(self):
+        with pytest.raises(ValueError, match="edad_jubilacion"):
+            gen_afp(self.SALDO, self.APORTE, self.TASA, 65.0, 64.0, self.FECHA)
+
+    def test_misma_edad_falla(self):
+        with pytest.raises(ValueError, match="edad_jubilacion"):
+            gen_afp(self.SALDO, self.APORTE, self.TASA, 65.0, 65.0, self.FECHA)
+
+
+# ===========================================================================
+# flujo_neto_mensual
+# ===========================================================================
+
+
+class TestFlujoNetoMensual:
+    """Flujo neto mensual consolidado."""
+
+    FECHA = date(2026, 4, 1)
+    INGRESO = 2_000_000
+
+    def _tabla_simple(self, n=12, flujo=-100_000, moneda="CLP") -> pd.DataFrame:
+        """Genera una tabla sintética con Flujo_Periodo constante."""
+        from core.schedule import _next_month, _parse_fecha  # noqa: PLC0415
+        fecha = _parse_fecha(self.FECHA)
+        rows = []
+        for _ in range(n):
+            rows.append({"Periodo": fecha.strftime("%Y-%m"), "Flujo_Periodo": flujo})
+            fecha = _next_month(fecha)
+        return pd.DataFrame(rows)
+
+    # Estructura
+    def test_columnas_salida(self):
+        df = flujo_neto_mensual([self._tabla_simple()], self.INGRESO)
+        assert list(df.columns) == ["Periodo", "Flujo_Pasivos", "Ingreso", "Flujo_Neto"]
+
+    def test_retorna_vacio_sin_tablas(self):
+        df = flujo_neto_mensual([], self.INGRESO)
+        assert df.empty
+        assert "Flujo_Neto" in df.columns
+
+    # Valores
+    def test_flujo_neto_positivo_cuando_ingreso_mayor(self):
+        df = flujo_neto_mensual([self._tabla_simple(flujo=-100_000)], self.INGRESO)
+        assert (df["Flujo_Neto"] > 0).all()
+
+    def test_flujo_neto_negativo_cuando_cuota_mayor(self):
+        df = flujo_neto_mensual([self._tabla_simple(flujo=-3_000_000)], self.INGRESO)
+        assert (df["Flujo_Neto"] < 0).all()
+
+    def test_ingreso_constante_en_todas_las_filas(self):
+        df = flujo_neto_mensual([self._tabla_simple()], self.INGRESO)
+        assert (df["Ingreso"] == self.INGRESO).all()
+
+    def test_flujo_neto_igual_ingreso_mas_pasivos(self):
+        df = flujo_neto_mensual([self._tabla_simple(flujo=-500_000)], self.INGRESO)
+        expected = self.INGRESO + (-500_000)
+        assert (abs(df["Flujo_Neto"] - expected) < 1e-4).all()
+
+    def test_dos_tablas_suman_flujos_por_periodo(self):
+        """Dos pasivos en los mismos períodos → Flujo_Pasivos = suma de ambos."""
+        t1 = self._tabla_simple(flujo=-200_000)
+        t2 = self._tabla_simple(flujo=-300_000)
+        df = flujo_neto_mensual([t1, t2], self.INGRESO)
+        assert (abs(df["Flujo_Pasivos"] - (-500_000)) < 1e-4).all()
+
+    def test_periodos_ordenados(self):
+        df = flujo_neto_mensual([self._tabla_simple(n=6)], self.INGRESO)
+        periodos = list(df["Periodo"])
+        assert periodos == sorted(periodos)
+
+    def test_numero_filas_igual_a_periodos_unicos(self):
+        t1 = self._tabla_simple(n=6)
+        t2 = self._tabla_simple(n=6)
+        df = flujo_neto_mensual([t1, t2], self.INGRESO)
+        assert len(df) == 6  # mismos períodos → 6 filas, no 12
+
+    def test_tablas_con_periodos_distintos(self):
+        """Tablas con períodos distintos se agregan correctamente."""
+        from core.schedule import gen_credito_consumo  # noqa: PLC0415
+        t1 = gen_credito_consumo(1_000_000, 6, 0.0, date(2026, 4, 1))
+        t2 = gen_credito_consumo(1_000_000, 6, 0.0, date(2026, 7, 1))
+        df = flujo_neto_mensual([t1, t2], self.INGRESO)
+        # Períodos: 2026-04 a 2026-09 (t1) ∪ 2026-07 a 2026-12 (t2) = 9 únicos
+        assert len(df) == 9
+
+    # Validaciones
+    def test_ingreso_negativo_falla(self):
+        with pytest.raises(ValueError, match="ingreso_mensual"):
+            flujo_neto_mensual([self._tabla_simple()], -1)

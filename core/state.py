@@ -44,6 +44,9 @@ def _make_defaults() -> dict[str, Any]:
     return {
         "dirty": False,
         "positions": {},
+        "schedules": {},            # {id_posicion: pd.DataFrame} — tablas de desarrollo en memoria
+        "pasivos_con_tabla": [],    # lista de IDs de pasivos con tabla generada (Capa 3 unlock)
+        "afp_saldo": None,          # float | None — saldo AFP actual (Capa 3 unlock)
         "layer_unlocked": 1,
         "onboarding_complete": False,
         "last_saved": None,
