@@ -62,6 +62,17 @@ def _make_defaults() -> dict[str, Any]:
         "last_saved": None,
         # Capa 2-C — desagregación de buckets
         "sugerencias_pendientes": [],   # list[dict] — sugerencias de vinculación bucket
+        # Agente Planificador — parámetros editables (Capa 3)
+        "plan_params": {
+            "tasa_reemplazo": 0.70,        # fracción del ingreso como pensión objetivo
+            "anos_retiro": 20,             # años de retiro esperados (default: 85 - 65)
+            "meses_reserva_meta": 6,       # meses de esenciales para el fondo
+            "distribucion_paso4": {        # distribución del margen libre en Paso 4
+                "inversion": 0.50,
+                "estilo_vida": 0.30,
+                "libre": 0.20,
+            },
+        },
     }
 
 # Labels del indicador de estado
