@@ -119,15 +119,17 @@ def _aplicar_sugerencia(sug: dict) -> None:
     state.mark_dirty()
 
 
-def _bucket_desglose_md(bucket_id: str, monto: float) -> str:
-    """Genera texto markdown de desglose de un bucket con sus posiciones vinculadas.
+def _render_bucket_desglose(bucket_id: str, monto: float) -> None:
+    """Renderiza el desglose de un bucket con una llamada separada a st.markdown().
+
+    Siempre muestra la etiqueta del bucket. Si hay posiciones vinculadas,
+    despliega el desglose detallado (vinculado + resto). Cada bucket ocupa
+    su propio bloque de markdown para evitar que los montos se concatenen
+    sin separadores visibles.
 
     Args:
         bucket_id: ID del bucket (``"GAS_ESE_BUCKET"`` etc.).
-        monto: Monto total del bucket en la moneda principal.
-
-    Returns:
-        String markdown con el desglose (vinculado + resto) o el monto simple.
+        monto: Monto total del bucket en CLP (o moneda principal).
     """
     positions = st.session_state.get("positions", {})
     vinculadas = [
@@ -135,10 +137,12 @@ def _bucket_desglose_md(bucket_id: str, monto: float) -> str:
         for pid, p in positions.items()
         if p.get("bucket_vinculado") == bucket_id
     ]
-    if not vinculadas:
-        return _fmt(monto)
-
     label = _BUCKET_LABELS.get(bucket_id, bucket_id)
+
+    if not vinculadas:
+        st.markdown(f"**{label}:** {_fmt(monto)}", unsafe_allow_html=True)
+        return
+
     lines = [f"**{label}: {_fmt(monto)}**"]
     total_vinculado = 0.0
     for pid, p in vinculadas:
@@ -148,7 +152,7 @@ def _bucket_desglose_md(bucket_id: str, monto: float) -> str:
         total_vinculado += cuota
     resto = monto - total_vinculado
     lines.append(f"&nbsp;&nbsp;└ Resto estimado: {_fmt(max(0.0, resto))}")
-    return "  \n".join(lines)
+    st.markdown("  \n".join(lines), unsafe_allow_html=True)
 
 
 @st.cache_resource
@@ -285,6 +289,16 @@ with col_right:
             {**pos_liq, "Saldo_Actual": live_liq, "Meses_Meta_Fondo": live_meses},
         )
 
+    st.divider()
+    if st.button(
+        "➕ Registrar inversión o activo financiero → Capa 3",
+        use_container_width=True,
+        key="btn_ir_capa3_inv",
+        help="Abre Capa 3 con el formulario de activos listo para agregar.",
+    ):
+        st.session_state["c3_auto_open_zona3"] = True
+        st.switch_page("pages/04_capa3_crecimiento.py")
+
 # ────────────────────────────────────────────────────────────────────────────
 # MÉTRICAS — calculadas con valores live, renderizadas en el placeholder
 # ────────────────────────────────────────────────────────────────────────────
@@ -354,12 +368,9 @@ with _metrics_ph.container():
     _positions_all = st.session_state.get("positions", {})
     _any_vinculado = any(p.get("bucket_vinculado") for p in _positions_all.values())
     if _any_vinculado:
-        st.markdown(
-            _bucket_desglose_md("GAS_ESE_BUCKET", live_ese) + "  \n" +
-            _bucket_desglose_md("GAS_IMP_BUCKET", live_imp) + "  \n" +
-            _bucket_desglose_md("GAS_ASP_BUCKET", live_asp),
-            unsafe_allow_html=True,
-        )
+        _render_bucket_desglose("GAS_ESE_BUCKET", live_ese)
+        _render_bucket_desglose("GAS_IMP_BUCKET", live_imp)
+        _render_bucket_desglose("GAS_ASP_BUCKET", live_asp)
     else:
         st.caption(
             f"Esenciales {_fmt(live_ese)}  ·  "

@@ -386,7 +386,7 @@ def _generar_paso1(ctx: dict) -> dict:
         ),
         "accion": (
             f"Destina $ {int(margen_para_deudas):,}/mes comenzando por "
-            f"**{primera['descripcion']}** "
+            f"{primera['descripcion']} "
             f"({primera['tasa_anual'] * 100:.1f}% anual)."
         ),
         "monto_mensual": margen_para_deudas,
@@ -489,14 +489,17 @@ def _generar_paso2(ctx: dict, paso1: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _generar_paso3(ctx: dict) -> dict:
+def _generar_paso3(ctx: dict, margen_disponible_p3: float = 0.0) -> dict:
     """Paso 3 — Pensión asegurada (siempre activo desde el inicio).
 
     Calcula la brecha entre la meta de acumulación y la proyección actual
-    (AFP + APV). Sugiere el aporte adicional mensual para cerrarla.
+    (AFP + APV). Sugiere el aporte adicional mensual para cerrarla, capped
+    por el margen disponible tras Pasos 1 y 2.
 
     Args:
         ctx: Contexto extraído por :func:`_extraer_contexto`.
+        margen_disponible_p3: Margen libre restante después de P1 y P2 (CLP).
+            Si es 0, el aporte efectivo es 0 pero se muestra el ideal.
 
     Returns:
         PasoPlan dict.
@@ -543,10 +546,10 @@ def _generar_paso3(ctx: dict) -> dict:
             "params": params_paso3,
         }
 
-    # Aporte adicional mensual lineal para cerrar la brecha
+    # Aporte ideal mensual lineal para cerrar la brecha
     # Fallback: 120 meses (10 años) si no hay edad AFP registrada
     divisor = meses_hasta_jub if meses_hasta_jub > 0 else 120
-    aporte_adicional = brecha / divisor
+    aporte_ideal = brecha / divisor
 
     if proyeccion_pension_clp > 0:
         diagnostico = (
@@ -562,16 +565,35 @@ def _generar_paso3(ctx: dict) -> dict:
             "Registra tu AFP en Capa 2 para ver tu proyección actual."
         )
 
+    # Coordinación de margen: capped por lo disponible tras P1 y P2
+    if margen_disponible_p3 <= 0:
+        accion = (
+            f"Cuando liberes margen, necesitarás $ {int(aporte_ideal):,}/mes "
+            f"para alcanzar tu meta pensional."
+        )
+        aporte_efectivo = 0.0
+    elif aporte_ideal <= margen_disponible_p3:
+        accion = (
+            f"Brecha de $ {int(brecha):,} — aumenta tu APV en "
+            f"$ {int(aporte_ideal):,}/mes."
+        )
+        aporte_efectivo = aporte_ideal
+    else:
+        # Margen insuficiente: mostrar cuánto se puede aportar y en cuánto cierra
+        anos_brecha = math.ceil(brecha / (margen_disponible_p3 * 12))
+        accion = (
+            f"Con tu margen disponible de $ {int(margen_disponible_p3):,}/mes "
+            f"puedes aportar a tu APV — cerrarás la brecha en ~{anos_brecha} años."
+        )
+        aporte_efectivo = margen_disponible_p3
+
     return {
         "numero": 3,
         "titulo": "Pensión asegurada",
         "estado": ESTADO_EN_CURSO if proyeccion_pension_clp > 0 else ESTADO_PENDIENTE,
         "diagnostico": diagnostico,
-        "accion": (
-            f"Brecha de $ {int(brecha):,} — aumenta tu APV en "
-            f"$ {int(aporte_adicional):,}/mes."
-        ),
-        "monto_mensual": aporte_adicional,
+        "accion": accion,
+        "monto_mensual": aporte_efectivo,
         "plazo_meses": meses_hasta_jub,
         "params": params_paso3,
     }
@@ -582,21 +604,27 @@ def _generar_paso3(ctx: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _generar_paso4(ctx: dict, paso1: dict, paso2: dict) -> dict:
+def _generar_paso4(
+    ctx: dict,
+    paso1: dict,
+    paso2: dict,
+    margen_disponible_p4: float = 0.0,
+) -> dict:
     """Paso 4 — Acumulación y estilo de vida.
 
     Se activa únicamente cuando Paso 1 y Paso 2 están completos.
-    Distribuye el margen libre restante según la distribución configurada.
+    Distribuye el margen libre restante (tras P1, P2 y P3) según la
+    distribución configurada.
 
     Args:
         ctx: Contexto extraído por :func:`_extraer_contexto`.
         paso1: Resultado de :func:`_generar_paso1`.
         paso2: Resultado de :func:`_generar_paso2`.
+        margen_disponible_p4: Margen libre restante después de P1, P2 y P3 (CLP).
 
     Returns:
         PasoPlan dict.
     """
-    margen: float = ctx["margen_clp"]
     plan_params: dict = ctx["plan_params"]
 
     distribucion: dict = plan_params.get(
@@ -645,7 +673,7 @@ def _generar_paso4(ctx: dict, paso1: dict, paso2: dict) -> dict:
             "params": {"distribucion_paso4": distribucion},
         }
 
-    margen_disponible = max(0.0, margen)
+    margen_disponible = max(0.0, margen_disponible_p4)
     inv_clp = margen_disponible * distribucion.get("inversion", 0.50)
     ev_clp = margen_disponible * distribucion.get("estilo_vida", 0.30)
     libre_clp = margen_disponible * distribucion.get("libre", 0.20)
@@ -708,6 +736,13 @@ def generar_plan(session_state: dict) -> list[dict]:
     ctx = _extraer_contexto(session_state)
     paso1 = _generar_paso1(ctx)
     paso2 = _generar_paso2(ctx, paso1)
-    paso3 = _generar_paso3(ctx)
-    paso4 = _generar_paso4(ctx, paso1, paso2)
+    # Cascada de margen: cada paso recibe solo lo que queda tras los anteriores.
+    # Si el paso está completo, su consumo de margen es 0.
+    margen_p1 = paso1["monto_mensual"] if paso1["estado"] != ESTADO_COMPLETO else 0.0
+    margen_p2 = paso2["monto_mensual"] if paso2["estado"] != ESTADO_COMPLETO else 0.0
+    margen_restante_p3 = max(0.0, ctx["margen_clp"] - margen_p1 - margen_p2)
+    paso3 = _generar_paso3(ctx, margen_restante_p3)
+    margen_p3 = paso3["monto_mensual"] if paso3["estado"] != ESTADO_COMPLETO else 0.0
+    margen_restante_p4 = max(0.0, ctx["margen_clp"] - margen_p1 - margen_p2 - margen_p3)
+    paso4 = _generar_paso4(ctx, paso1, paso2, margen_restante_p4)
     return [paso1, paso2, paso3, paso4]

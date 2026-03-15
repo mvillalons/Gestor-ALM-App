@@ -56,6 +56,17 @@ _ACT_PREFIX: dict[str, str] = {
     "Otro":        "ACT_OTR",
 }
 
+# Tipos y defaults para la sección "Otras inversiones" (inversión directa)
+_TIPOS_INV = ["Acciones", "ETF", "Renta Fija", "Cripto", "Otro"]
+
+_TASA_DEFAULT_INV: dict[str, float] = {
+    "Acciones":   8.0,
+    "ETF":        7.0,
+    "Renta Fija": 4.0,
+    "Cripto":    15.0,
+    "Otro":       5.0,
+}
+
 _BUCKET_LABELS: dict[str, str] = {
     "GAS_ESE_BUCKET": "Esenciales",
     "GAS_IMP_BUCKET": "Importantes",
@@ -130,6 +141,21 @@ def _next_id_activo(tipo: str) -> str:
         except ValueError:
             pass
     return f"{prefix}_{max(nums, default=0) + 1:03d}"
+
+
+def _next_id_inversion(descripcion: str) -> str:
+    import re  # noqa: PLC0415
+    slug = re.sub(r"[^A-Z0-9]", "_", descripcion.upper().strip())[:20].strip("_")
+    if not slug:
+        slug = "INV"
+    base = f"ACT_INV_{slug}"
+    existing = state.list_positions(clase="Activo_Financiero")
+    if base not in existing:
+        return base
+    i = 2
+    while f"{base}_{i}" in existing:
+        i += 1
+    return f"{base}_{i}"
 
 
 def _next_id_objetivo(nombre: str) -> str:
@@ -607,6 +633,8 @@ st.divider()
 _zona3_expanded = (
     st.session_state.get("c3_show_activo_form", False)
     or st.session_state.get("c3_show_obj_form", False)
+    or st.session_state.get("c3_show_inv_form", False)
+    or bool(st.session_state.pop("c3_auto_open_zona3", False))
 )
 
 with st.expander("⚙️ Gestionar activos y objetivos", expanded=_zona3_expanded):
@@ -812,6 +840,179 @@ with st.expander("⚙️ Gestionar activos y objetivos", expanded=_zona3_expande
                 st.rerun()
             except Exception as _exc:
                 st.error(f"Error al generar proyección: {_exc}")
+
+    # ── Otras inversiones ────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### 💹 Otras inversiones")
+    st.caption("Acciones, ETFs, renta fija, cripto u otros activos de inversión directa.")
+    _inv_ids = [
+        pid for pid in state.list_positions(clase="Activo_Financiero")
+        if pid.startswith("ACT_INV_")
+    ]
+
+    if not st.session_state.get("c3_show_inv_form", False):
+        if st.button("➕ Agregar inversión", use_container_width=True, key="btn_add_inv"):
+            for _k in [
+                "c3_inv_tipo", "c3_inv_desc", "c3_inv_saldo",
+                "c3_inv_aporte", "c3_inv_tasa", "c3_inv_horizonte",
+            ]:
+                st.session_state.pop(_k, None)
+            st.session_state["c3_show_inv_form"] = True
+            st.session_state.pop("c3_edit_inv_id", None)
+            st.rerun()
+
+    if _inv_ids:
+        for _inv_id in _inv_ids:
+            _inv_p = _pos(_inv_id)
+            _inv_saldo = float(_inv_p.get("Saldo_Actual", 0))
+            _inv_proy = _saldo_fin_proyectado(_inv_id, _inv_saldo)
+            _inv_proy_clp = _clp(_inv_proy, "CLP")
+            _inv_saldo_clp = _clp(_inv_saldo, "CLP")
+            _inv_horiz_anos = int(_inv_p.get("Horizonte_Meses", 60)) // 12
+            c_iv1, c_iv2, c_iv3 = st.columns([5, 1, 1])
+            with c_iv1:
+                st.markdown(
+                    f"**{_inv_p.get('Descripcion', _inv_id)}** · "
+                    f"*{_inv_p.get('Tipo', '')}*  \n"
+                    f"Saldo $ {int(_inv_saldo_clp):,} · Proy. $ {int(_inv_proy_clp):,} "
+                    f"({_inv_horiz_anos} años)"
+                )
+                st.caption(
+                    f"Rendimiento esperado {_inv_p.get('Tasa_Anual_Pct', 7.0):.1f}% anual"
+                )
+            with c_iv2:
+                if st.button("✏️", key=f"edit_inv_{_inv_id}", help="Editar"):
+                    for _k in [
+                        "c3_inv_tipo", "c3_inv_desc", "c3_inv_saldo",
+                        "c3_inv_aporte", "c3_inv_tasa", "c3_inv_horizonte",
+                    ]:
+                        st.session_state.pop(_k, None)
+                    st.session_state["c3_show_inv_form"] = True
+                    st.session_state["c3_edit_inv_id"] = _inv_id
+                    st.rerun()
+            with c_iv3:
+                if st.button("🗑️", key=f"del_inv_{_inv_id}", help="Eliminar"):
+                    state.delete_position(_inv_id)
+                    st.session_state.get("schedules", {}).pop(_inv_id, None)
+                    _act_lista_inv: list = st.session_state.setdefault("activos_con_tabla", [])
+                    if _inv_id in _act_lista_inv:
+                        _act_lista_inv.remove(_inv_id)
+                    state.update_layer()
+                    state.mark_dirty()
+                    st.rerun()
+    elif not st.session_state.get("c3_show_inv_form", False):
+        st.info("Sin inversiones directas registradas. Usa ➕ para agregar acciones, ETFs, cripto, etc.")
+
+    if st.session_state.get("c3_show_inv_form", False):
+        _edit_inv_id: str | None = st.session_state.get("c3_edit_inv_id")
+        _edit_inv_p = state.get_position(_edit_inv_id) or {} if _edit_inv_id else {}
+        _modo_inv = "✏️ Editar inversión" if _edit_inv_id else "➕ Nueva inversión directa"
+
+        with st.form("form_inversion"):
+            st.markdown(f"**{_modo_inv}**")
+            _tipos_inv_idx = (
+                _TIPOS_INV.index(_edit_inv_p.get("Tipo", _TIPOS_INV[0]))
+                if _edit_inv_p.get("Tipo") in _TIPOS_INV
+                else 0
+            )
+            _tipo_inv = st.selectbox(
+                "Tipo de inversión", _TIPOS_INV, index=_tipos_inv_idx, key="c3_inv_tipo"
+            )
+            _desc_inv = st.text_input(
+                "Descripción",
+                value=_edit_inv_p.get("Descripcion", ""),
+                placeholder="Ej: Apple AAPL, Bitcoin, US Treasury 2032…",
+                key="c3_inv_desc",
+            )
+            _col_fi1, _col_fi2 = st.columns(2)
+            with _col_fi1:
+                _saldo_inv = st.number_input(
+                    "Saldo actual (CLP)",
+                    min_value=0,
+                    value=int(_edit_inv_p.get("Saldo_Actual", 0)),
+                    step=1_000,
+                    key="c3_inv_saldo",
+                )
+                _aporte_inv = st.number_input(
+                    "Aporte mensual (CLP)",
+                    min_value=0,
+                    value=int(_edit_inv_p.get("Aporte_Mensual", 0)),
+                    step=1_000,
+                    key="c3_inv_aporte",
+                    help="0 si no realizas aportes periódicos.",
+                )
+            with _col_fi2:
+                _tasa_def_inv = _TASA_DEFAULT_INV.get(_tipo_inv, 7.0)
+                _tasa_inv = st.number_input(
+                    "Tasa esperada anual (%)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=float(_edit_inv_p.get("Tasa_Anual_Pct", _tasa_def_inv)),
+                    step=0.5,
+                    format="%.1f",
+                    key="c3_inv_tasa",
+                )
+                _horiz_inv_years = st.slider(
+                    "Horizonte (años)",
+                    min_value=1,
+                    max_value=40,
+                    value=int(_edit_inv_p.get("Horizonte_Meses", 60)) // 12,
+                    key="c3_inv_horizonte",
+                )
+            _col_ok_inv, _col_can_inv = st.columns(2)
+            with _col_ok_inv:
+                _inv_ok = st.form_submit_button(
+                    "✓ Confirmar", type="primary", use_container_width=True
+                )
+            with _col_can_inv:
+                _inv_cancel = st.form_submit_button("✕ Cancelar", use_container_width=True)
+
+        if _inv_cancel:
+            st.session_state["c3_show_inv_form"] = False
+            st.session_state.pop("c3_edit_inv_id", None)
+            st.rerun()
+
+        if _inv_ok:
+            if not _desc_inv.strip():
+                st.error("La descripción no puede estar vacía.")
+                st.stop()
+            _horiz_inv_meses = _horiz_inv_years * 12
+            _id_final_inv = _edit_inv_id if _edit_inv_id else _next_id_inversion(_desc_inv)
+            _params_inv: dict = {
+                "Tipo": _tipo_inv,
+                "Descripcion": _desc_inv.strip(),
+                "Clase": "Activo_Financiero",
+                "Moneda": "CLP",
+                "Capa_Activacion": 3,
+                "Saldo_Actual": float(_saldo_inv),
+                "Aporte_Mensual": float(_aporte_inv),
+                "Tasa_Anual": _tasa_inv / 100,
+                "Tasa_Anual_Pct": _tasa_inv,
+                "Horizonte_Meses": _horiz_inv_meses,
+                "Fecha_Inicio": date.today().isoformat(),
+            }
+            try:
+                _tabla_inv = schedule.gen_fondo_inversion(
+                    saldo=float(_saldo_inv),
+                    aporte_mensual=float(_aporte_inv),
+                    tasa_anual=_tasa_inv / 100,
+                    horizonte_meses=_horiz_inv_meses,
+                    fecha_inicio=date.today(),
+                    moneda="CLP",
+                    id_posicion=_id_final_inv,
+                )
+                state.set_position(_id_final_inv, _params_inv)
+                st.session_state.setdefault("schedules", {})[_id_final_inv] = _tabla_inv
+                _act_list_inv: list = st.session_state.setdefault("activos_con_tabla", [])
+                if _id_final_inv not in _act_list_inv:
+                    _act_list_inv.append(_id_final_inv)
+                state.update_layer()
+                state.mark_dirty()
+                st.session_state["c3_show_inv_form"] = False
+                st.session_state.pop("c3_edit_inv_id", None)
+                st.rerun()
+            except Exception as _exc_inv:
+                st.error(f"Error al generar proyección: {_exc_inv}")
 
     # ── Objetivos de ahorro ───────────────────────────────────────────────────
     st.divider()

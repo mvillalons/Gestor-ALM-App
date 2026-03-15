@@ -1086,11 +1086,29 @@ with col_right:
                     st.error("La institución no puede estar vacía.")
                     st.stop()
 
-                # Horizonte: hasta jubilación AFP (si existe) o 20 años por defecto
-                _afp_p_hz = _pos("AFP_PRINCIPAL")
-                _edad_act_hz = float(_afp_p_hz.get("Edad_Actual", 35))
-                _edad_jub_hz = float(_afp_p_hz.get("Edad_Jubilacion", 65))
+                # Horizonte: buscar en TODAS las posiciones AFP_*, luego plan_params, luego defaults
+                _afp_ids_hz = state.list_positions(clase="Prevision_AFP")
+                _edad_act_hz: float = 40.0
+                _edad_jub_hz: float = 65.0
+                _hz_from_afp = False
+                for _afp_pid in _afp_ids_hz:
+                    _afp_p_hz = _pos(_afp_pid)
+                    if "Edad_Actual" in _afp_p_hz:
+                        _edad_act_hz = float(_afp_p_hz["Edad_Actual"])
+                        _edad_jub_hz = float(_afp_p_hz.get("Edad_Jubilacion", 65))
+                        _hz_from_afp = True
+                        break
+                if not _hz_from_afp:
+                    _pp_hz = st.session_state.get("plan_params", {})
+                    if "edad_jubilacion" in _pp_hz:
+                        _edad_jub_hz = float(_pp_hz["edad_jubilacion"])
                 _horizonte_apv = max(1, round((_edad_jub_hz - _edad_act_hz) * 12))
+                if not _hz_from_afp:
+                    st.info(
+                        f"ℹ️ Sin AFP registrada — horizonte estimado a {_horizonte_apv} meses "
+                        f"(edad {int(_edad_act_hz)} → {int(_edad_jub_hz)} años). "
+                        "Registra tu AFP en la sección de previsión para un cálculo exacto."
+                    )
 
                 _apv_suffix = (
                     apv_inst.strip().upper()
@@ -1110,6 +1128,7 @@ with col_right:
                     "Tasa_Anual_Pct": apv_tasa_in,
                     "Regimen_Tributario": apv_regimen,
                     "Fecha_Inicio": date.today().isoformat(),
+                    "Horizonte_Meses": _horizonte_apv,
                 }
                 try:
                     tabla_apv_nueva = schedule.gen_fondo_inversion(

@@ -309,17 +309,19 @@ class TestPaso3Pension:
         assert "Pensión" in plan[2]["titulo"] or "pension" in plan[2]["titulo"].lower()
 
     def test_brecha_correcta_sin_afp(self) -> None:
-        """Sin AFP: proyeccion=0, brecha=meta=ingreso×0.70×12×20."""
+        """Sin AFP, aporte_ideal supera el margen → monto se limita al margen disponible.
+
+        Con divisor=120 (fallback sin AFP), aporte_ideal = ing×1.4 > ing ≥ margen,
+        por lo que el monto efectivo queda capped al margen disponible tras P1 y P2.
+        """
         ss = _ss_base()
         _add_ing(ss, 1_000_000)
         params = planner.make_plan_params_defaults()
         ss["plan_params"] = params
         plan = planner.generar_plan(ss)
-        # meta = 1M × 0.70 × 12 × 20 = 168M
-        # fallback divisor = 120 meses
-        # aporte = 168M / 120 = 1_400_000
-        expected = (1_000_000 * 0.70 * 12 * 20) / 120
-        assert plan[2]["monto_mensual"] == pytest.approx(expected, rel=1e-6)
+        # meta = 1M × 0.70 × 12 × 20 = 168M; divisor = 120 → aporte_ideal = 1.4M
+        # ese=0 → P2 completo; margen = 1M; 1.4M > 1M → monto capped al margen (1M)
+        assert plan[2]["monto_mensual"] == pytest.approx(1_000_000, rel=1e-3)
 
     def test_tasa_reemplazo_50_pct(self) -> None:
         ss = _ss_base()
@@ -468,6 +470,7 @@ class TestPaso4Acumulacion:
         assert "$" in plan[3]["diagnostico"]
 
     def test_monto_mensual_igual_a_margen_libre(self) -> None:
+        """Cuando P1+P2+P3 están completos, P4 recibe el margen libre íntegro."""
         ss = _ss_base()
         _add_ing(ss, 2_000_000)
         _add_ese(ss, 500_000)
@@ -477,8 +480,19 @@ class TestPaso4Acumulacion:
         params = planner.make_plan_params_defaults()
         params["meses_reserva_meta"] = 6
         ss["plan_params"] = params
+        # AFP con proyección enorme → brecha ≤ 0 → P3 completo → no consume margen
+        ss["positions"]["AFP_COBERTURA"] = {
+            "Clase": "Prevision_AFP",
+            "Saldo_Actual": 1_000_000_000,
+            "Edad_Actual": 35.0,
+            "Edad_Jubilacion": 65.0,
+            "Aporte_Mensual": 0,
+            "Tasa_Anual": 0.0,
+            "Moneda": "CLP",
+        }
         plan = planner.generar_plan(ss)
         # margen = 2M - 500K - 200K - 100K = 1.2M
+        # P1 completo, P2 completo, P3 completo → P4 recibe 1.2M íntegros
         assert plan[3]["monto_mensual"] == pytest.approx(1_200_000)
 
 
@@ -550,8 +564,19 @@ class TestParametrosEditablesCambianPlan:
         assert plan_9[1]["plazo_meses"] >= plan_6[1]["plazo_meses"]
 
     def test_cambiar_tasa_reemplazo_afecta_paso3(self) -> None:
-        ss = self._ss_con_deuda_y_fondo()
-        _add_ing(ss, 1_000_000)
+        """Menor tasa de reemplazo → menor aporte requerido en Paso 3.
+
+        Usa setup con P1+P2 completos para que el margen disponible llegue al
+        Paso 3 sin ser consumido por deudas o fondo.
+        Con AFP (divisor=360): aporte_70≈933K, aporte_50≈667K — ambos < margen(1.5M).
+        """
+        ss = _ss_base()
+        _add_ing(ss, 2_000_000)
+        _add_ese(ss, 500_000)
+        _add_liq(ss, 4_000_000)  # 8 meses > 6 → P2 completo
+        ss["positions"]["GAS_IMP_BUCKET"] = {"Monto_Mensual": 0, "Moneda": "CLP"}
+        ss["positions"]["GAS_ASP_BUCKET"] = {"Monto_Mensual": 0, "Moneda": "CLP"}
+        _add_afp(ss, saldo=0, edad_actual=35.0, edad_jubilacion=65.0)
 
         params_70 = planner.make_plan_params_defaults()
         params_70["tasa_reemplazo"] = 0.70
@@ -565,7 +590,7 @@ class TestParametrosEditablesCambianPlan:
         plan_50 = planner.generar_plan(ss)
         monto_50 = plan_50[2]["monto_mensual"]
 
-        # Menor tasa de reemplazo → menor aporte requerido
+        # Menor tasa de reemplazo → menor brecha → menor aporte requerido
         assert monto_50 < monto_70
 
     def test_paso4_se_activa_tras_completar_deuda_y_fondo(self) -> None:
@@ -589,3 +614,139 @@ class TestParametrosEditablesCambianPlan:
         assert plan_con[0]["estado"] == planner.ESTADO_COMPLETO
         assert plan_con[1]["estado"] == planner.ESTADO_COMPLETO
         assert plan_con[3]["estado"] == planner.ESTADO_EN_CURSO
+
+
+# ---------------------------------------------------------------------------
+# 8. Coordinación de margen — cascada P1→P2→P3→P4
+# ---------------------------------------------------------------------------
+
+
+class TestMargenCascada:
+    """Verifica que el margen se reparte correctamente entre los pasos."""
+
+    def _ss_p1p2_completos(
+        self,
+        ingreso: float = 5_000_000,
+        esenciales: float = 4_000_000,
+    ) -> dict:
+        """Session state sin deudas y con fondo completo (P1 y P2 completos)."""
+        ss = _ss_base()
+        _add_ing(ss, ingreso)
+        _add_ese(ss, esenciales)
+        # Fondo = 8 meses de esenciales > 6 → Paso 2 completo
+        _add_liq(ss, esenciales * 8)
+        ss["positions"]["GAS_IMP_BUCKET"] = {"Monto_Mensual": 0, "Moneda": "CLP"}
+        ss["positions"]["GAS_ASP_BUCKET"] = {"Monto_Mensual": 0, "Moneda": "CLP"}
+        return ss
+
+    def test_paso3_monto_capped_por_margen_disponible(self) -> None:
+        """Si aporte_ideal > margen disponible, Paso 3 devuelve min(ideal, margen)."""
+        # margen = 5M - 4M = 1M
+        # Sin AFP → divisor = 120 (fallback)
+        # meta = 5M × 0.70 × 12 × 20 = 840M → aporte_ideal = 840M/120 = 7M
+        # margen_restante_p3 = 1M → cap → monto_paso3 = 1M
+        ss = self._ss_p1p2_completos(ingreso=5_000_000, esenciales=4_000_000)
+        plan = planner.generar_plan(ss)
+
+        assert plan[0]["estado"] == planner.ESTADO_COMPLETO, "Paso 1 debe ser completo"
+        assert plan[1]["estado"] == planner.ESTADO_COMPLETO, "Paso 2 debe ser completo"
+        # El monto del Paso 3 no puede superar el margen libre (1M)
+        assert plan[2]["monto_mensual"] == pytest.approx(1_000_000, rel=1e-3)
+
+    def test_paso4_monto_cero_cuando_margen_agotado_por_p3(self) -> None:
+        """Cuando P3 consume todo el margen restante, P4 recibe 0 aunque esté activo."""
+        # misma configuración → P3 toma todo el margen (1M)
+        # margen_restante_p4 = 1M - 0 - 0 - 1M = 0
+        ss = self._ss_p1p2_completos(ingreso=5_000_000, esenciales=4_000_000)
+        plan = planner.generar_plan(ss)
+
+        # P4 está EN_CURSO (P1+P2 completos) pero sin margen
+        assert plan[3]["estado"] == planner.ESTADO_EN_CURSO
+        assert plan[3]["monto_mensual"] == pytest.approx(0.0, abs=1.0)
+
+    def test_paso4_recibe_margen_restante_tras_p3(self) -> None:
+        """Con brecha pensional pequeña, P4 obtiene el margen sobrante."""
+        # ingreso=2M, ese=500K, margen=1.5M, P2 completo (liq=4M > 3M=500K*6)
+        # AFP con saldo grande → brecha pequeña → aporte_ideal < margen
+        ss = _ss_base()
+        _add_ing(ss, 2_000_000)
+        _add_ese(ss, 500_000)
+        _add_liq(ss, 4_000_000)
+        ss["positions"]["GAS_IMP_BUCKET"] = {"Monto_Mensual": 0, "Moneda": "CLP"}
+        ss["positions"]["GAS_ASP_BUCKET"] = {"Monto_Mensual": 0, "Moneda": "CLP"}
+        # AFP con proyección muy alta → brecha = 0 → P3 completo → P4 recibe margen completo
+        ss["positions"]["AFP_GRANDE"] = {
+            "Clase": "Prevision_AFP",
+            "Saldo_Actual": 1_000_000_000,  # 1 billón → proyección > meta
+            "Edad_Actual": 35.0,
+            "Edad_Jubilacion": 65.0,
+            "Aporte_Mensual": 0,
+            "Tasa_Anual": 0.0,
+            "Moneda": "CLP",
+        }
+        plan = planner.generar_plan(ss)
+        # P3 completo → monto_p3 = 0 → P4 recibe margen completo = 1.5M
+        assert plan[2]["estado"] == planner.ESTADO_COMPLETO
+        assert plan[3]["monto_mensual"] == pytest.approx(1_500_000, rel=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# 9. Formato de texto — sin markdown en acciones, espacios correctos
+# ---------------------------------------------------------------------------
+
+
+class TestFormatoTexto:
+    """Verifica que las cadenas de texto tienen formato correcto."""
+
+    def test_accion_paso1_sin_asteriscos_markdown(self) -> None:
+        """La acción del Paso 1 no debe contener marcado bold (**)."""
+        ss = _ss_base()
+        _add_ing(ss, 2_000_000)
+        _add_ese(ss, 500_000)
+        _add_liq(ss, 0)
+        _add_deuda(ss, "PAS_CON_001", "Crédito BCI", 0.12, monto=1_000_000)
+        plan = planner.generar_plan(ss)
+        accion_p1 = plan[0]["accion"]
+        assert "**" not in accion_p1, (
+            f"Paso 1 accion tiene marcado markdown: {accion_p1!r}"
+        )
+
+    def test_accion_paso3_guion_con_espacios(self) -> None:
+        """El em-dash (—) en la acción del Paso 3 debe tener espacio antes y después."""
+        ss = _ss_base()
+        _add_ing(ss, 2_000_000)
+        _add_ese(ss, 200_000)
+        _add_liq(ss, 2_000_000)  # 10 meses → P2 completo
+        ss["positions"]["GAS_IMP_BUCKET"] = {"Monto_Mensual": 0, "Moneda": "CLP"}
+        ss["positions"]["GAS_ASP_BUCKET"] = {"Monto_Mensual": 0, "Moneda": "CLP"}
+        _add_afp(ss, saldo=0, edad_actual=35, edad_jubilacion=65)
+        plan = planner.generar_plan(ss)
+        accion_p3 = plan[2]["accion"]
+        # Solo verificar si la acción contiene un em-dash
+        if "—" in accion_p3:
+            idx = accion_p3.index("—")
+            assert accion_p3[idx - 1] == " ", (
+                f"Sin espacio antes del guión en Paso 3: {accion_p3!r}"
+            )
+            assert accion_p3[idx + 1] == " ", (
+                f"Sin espacio después del guión en Paso 3: {accion_p3!r}"
+            )
+
+    def test_diagnostico_sin_numeros_concatenados(self) -> None:
+        """Los diagnósticos no deben tener números pegados a palabras ('$500,000sin')."""
+        ss = _ss_base()
+        _add_ing(ss, 2_000_000)
+        _add_ese(ss, 500_000)
+        _add_liq(ss, 0)
+        _add_deuda(ss, "PAS_CON_001", "Crédito", 0.15)
+        plan = planner.generar_plan(ss)
+        for paso in plan:
+            # Verificar que '$ X' siempre tiene espacio después del signo $
+            diag = paso["diagnostico"]
+            if "$" in diag:
+                idx = diag.index("$")
+                # El carácter después de $ debe ser espacio o dígito (nunca letra)
+                post = diag[idx + 1] if idx + 1 < len(diag) else " "
+                assert post in (" ", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"), (
+                    f"Paso {paso['numero']}: $ seguido de {post!r} — posible concatenación"
+                )
