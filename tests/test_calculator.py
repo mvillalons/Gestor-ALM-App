@@ -7,8 +7,10 @@ from core.calculator import (
     MESES_META_DEFAULT,
     VALOR_UF_DEFAULT,
     VALOR_USD_DEFAULT,
+    bucket_sugerido,
     capa_desbloqueada,
     carga_financiera,
+    espacio_disponible_bucket,
     gap_fondo,
     margen_libre,
     mes_stress,
@@ -619,3 +621,113 @@ class TestCargaFinancieraMixMoneda:
     def test_normalizacion_sin_cuotas_en_moneda_principal_da_cero(self):
         """Sin cuotas, la carga financiera es 0 independiente de los FX."""
         assert carga_financiera([], 2_000_000.0) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestBucketSugerido
+# ---------------------------------------------------------------------------
+
+
+class TestBucketSugerido:
+    """Tests para calculator.bucket_sugerido()."""
+
+    def test_hipotecario_retorna_esenciales(self):
+        assert bucket_sugerido("Hipotecario") == "GAS_ESE_BUCKET"
+
+    def test_colegio_retorna_esenciales(self):
+        assert bucket_sugerido("Colegio") == "GAS_ESE_BUCKET"
+
+    def test_credito_consumo_retorna_importantes(self):
+        assert bucket_sugerido("Crédito consumo") == "GAS_IMP_BUCKET"
+
+    def test_tarjeta_retorna_importantes(self):
+        assert bucket_sugerido("Tarjeta") == "GAS_IMP_BUCKET"
+
+    def test_apv_retorna_aspiraciones(self):
+        assert bucket_sugerido("APV") == "GAS_ASP_BUCKET"
+
+    def test_otro_retorna_importantes_por_defecto(self):
+        assert bucket_sugerido("Otro") == "GAS_IMP_BUCKET"
+
+    def test_tipo_desconocido_retorna_importantes(self):
+        assert bucket_sugerido("Préstamo informal") == "GAS_IMP_BUCKET"
+
+    def test_string_vacio_retorna_importantes(self):
+        assert bucket_sugerido("") == "GAS_IMP_BUCKET"
+
+
+# ---------------------------------------------------------------------------
+# TestEspacioDisponibleBucket
+# ---------------------------------------------------------------------------
+
+
+class TestEspacioDisponibleBucket:
+    """Tests para calculator.espacio_disponible_bucket()."""
+
+    def _ss(self, bucket_monto: float, vinculadas: dict[str, float]) -> dict:
+        """Construye un session_state mínimo para los tests."""
+        positions: dict = {
+            "GAS_ESE_BUCKET": {"Monto_Mensual": bucket_monto},
+        }
+        for pid, cuota in vinculadas.items():
+            positions[pid] = {
+                "bucket_vinculado": "GAS_ESE_BUCKET",
+                "Cuota_Vinculada_CLP": cuota,
+            }
+        return {"positions": positions}
+
+    def test_sin_vinculaciones_espacio_igual_a_monto(self):
+        ss = self._ss(2_000_000, {})
+        assert espacio_disponible_bucket(ss, "GAS_ESE_BUCKET") == 2_000_000.0
+
+    def test_una_vinculacion_resta_correctamente(self):
+        ss = self._ss(2_000_000, {"PAS_HIP_001": 1_500_000})
+        assert espacio_disponible_bucket(ss, "GAS_ESE_BUCKET") == 500_000.0
+
+    def test_dos_vinculaciones_restan_suma(self):
+        ss = self._ss(3_000_000, {"PAS_HIP_001": 1_200_000, "PAS_COL_001": 800_000})
+        assert espacio_disponible_bucket(ss, "GAS_ESE_BUCKET") == 1_000_000.0
+
+    def test_cuota_igual_al_monto_da_cero(self):
+        ss = self._ss(1_000_000, {"PAS_HIP_001": 1_000_000})
+        assert espacio_disponible_bucket(ss, "GAS_ESE_BUCKET") == 0.0
+
+    def test_cuota_mayor_que_monto_da_negativo(self):
+        ss = self._ss(1_000_000, {"PAS_HIP_001": 1_500_000})
+        assert espacio_disponible_bucket(ss, "GAS_ESE_BUCKET") == -500_000.0
+
+    def test_bucket_inexistente_da_cero(self):
+        ss: dict = {"positions": {}}
+        assert espacio_disponible_bucket(ss, "GAS_ESE_BUCKET") == 0.0
+
+    def test_positions_vacias_da_cero(self):
+        ss: dict = {"positions": {}}
+        assert espacio_disponible_bucket(ss, "GAS_IMP_BUCKET") == 0.0
+
+    def test_vinculaciones_de_otro_bucket_no_afectan(self):
+        ss = {
+            "positions": {
+                "GAS_ESE_BUCKET": {"Monto_Mensual": 2_000_000},
+                "GAS_IMP_BUCKET": {"Monto_Mensual": 1_000_000},
+                "PAS_CON_001": {
+                    "bucket_vinculado": "GAS_IMP_BUCKET",
+                    "Cuota_Vinculada_CLP": 300_000,
+                },
+            }
+        }
+        # El espacio de ESE no debe verse afectado por vinculaciones de IMP
+        assert espacio_disponible_bucket(ss, "GAS_ESE_BUCKET") == 2_000_000.0
+
+    def test_sin_clave_positions_da_cero(self):
+        ss: dict = {}
+        assert espacio_disponible_bucket(ss, "GAS_ESE_BUCKET") == 0.0
+
+    def test_posicion_sin_cuota_vinculada_cuenta_como_cero(self):
+        """Posiciones con bucket_vinculado pero sin Cuota_Vinculada_CLP."""
+        ss = {
+            "positions": {
+                "GAS_ESE_BUCKET": {"Monto_Mensual": 2_000_000},
+                "PAS_HIP_001": {"bucket_vinculado": "GAS_ESE_BUCKET"},  # sin Cuota
+            }
+        }
+        assert espacio_disponible_bucket(ss, "GAS_ESE_BUCKET") == 2_000_000.0

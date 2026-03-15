@@ -60,6 +60,8 @@ def _make_defaults() -> dict[str, Any]:
         "layer_unlocked": 1,
         "onboarding_complete": False,
         "last_saved": None,
+        # Capa 2-C — desagregación de buckets
+        "sugerencias_pendientes": [],   # list[dict] — sugerencias de vinculación bucket
     }
 
 # Labels del indicador de estado

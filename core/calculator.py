@@ -23,6 +23,15 @@ from __future__ import annotations
 MESES_META_DEFAULT: int = 3
 BENCHMARK_CARGA_FINANCIERA: float = 0.35
 
+# Mapeo tipo de pasivo → ID del bucket sugerido (Capa 2-C)
+_BUCKET_SUGERIDO_MAP: dict[str, str] = {
+    "Hipotecario":     "GAS_ESE_BUCKET",
+    "Colegio":         "GAS_ESE_BUCKET",
+    "Crédito consumo": "GAS_IMP_BUCKET",
+    "Tarjeta":         "GAS_IMP_BUCKET",
+    "APV":             "GAS_ASP_BUCKET",
+}
+
 
 # ---------------------------------------------------------------------------
 # Capa 1 — Claridad
@@ -357,3 +366,72 @@ def capa_desbloqueada(session_state: dict) -> int:
         return 3
 
     return 4
+
+
+# ---------------------------------------------------------------------------
+# Capa 2-C — Desagregación de buckets
+# ---------------------------------------------------------------------------
+
+
+def bucket_sugerido(tipo_pasivo: str) -> str:
+    """Retorna el ID del bucket sugerido para un tipo de pasivo.
+
+    Usada al confirmar un pasivo para proponer automáticamente en qué bucket
+    clasificar la cuota mensual.
+
+    Args:
+        tipo_pasivo: Tipo del pasivo: ``"Hipotecario"``, ``"Colegio"``,
+            ``"Crédito consumo"``, ``"Tarjeta"``, ``"APV"`` u otro.
+
+    Returns:
+        ID del bucket: ``"GAS_ESE_BUCKET"``, ``"GAS_IMP_BUCKET"`` o
+        ``"GAS_ASP_BUCKET"``. Los tipos no mapeados retornan
+        ``"GAS_IMP_BUCKET"`` (Importantes) como valor por defecto.
+
+    Examples:
+        >>> bucket_sugerido("Hipotecario")
+        'GAS_ESE_BUCKET'
+        >>> bucket_sugerido("Tarjeta")
+        'GAS_IMP_BUCKET'
+        >>> bucket_sugerido("APV")
+        'GAS_ASP_BUCKET'
+        >>> bucket_sugerido("Otro")
+        'GAS_IMP_BUCKET'
+    """
+    return _BUCKET_SUGERIDO_MAP.get(tipo_pasivo, "GAS_IMP_BUCKET")
+
+
+def espacio_disponible_bucket(session_state: dict, bucket_id: str) -> float:
+    """Retorna el espacio disponible en un bucket tras descontar cuotas vinculadas.
+
+    Calcula cuánto del presupuesto del bucket queda libre después de restar
+    las cuotas de pasivos ya vinculados a ese bucket
+    (posiciones con ``bucket_vinculado == bucket_id``).
+
+    Args:
+        session_state: Diccionario de estado de sesión (contiene ``"positions"``).
+        bucket_id: ID del bucket a consultar
+            (p. ej. ``"GAS_ESE_BUCKET"``).
+
+    Returns:
+        ``monto_bucket - sum(cuotas_vinculadas)``.
+        Positivo → queda espacio disponible.
+        Negativo → el bucket está excedido.
+
+    Examples:
+        >>> ss = {"positions": {
+        ...     "GAS_ESE_BUCKET": {"Monto_Mensual": 2_000_000},
+        ...     "PAS_HIP_001": {"bucket_vinculado": "GAS_ESE_BUCKET",
+        ...                     "Cuota_Vinculada_CLP": 1_500_000},
+        ... }}
+        >>> espacio_disponible_bucket(ss, "GAS_ESE_BUCKET")
+        500000.0
+    """
+    positions: dict = session_state.get("positions", {})
+    monto_bucket = float(positions.get(bucket_id, {}).get("Monto_Mensual", 0.0))
+    cuotas_vinculadas = sum(
+        float(p.get("Cuota_Vinculada_CLP", 0.0))
+        for p in positions.values()
+        if p.get("bucket_vinculado") == bucket_id
+    )
+    return monto_bucket - cuotas_vinculadas

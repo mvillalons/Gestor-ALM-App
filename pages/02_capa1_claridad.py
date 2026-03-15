@@ -30,6 +30,13 @@ state.init_session_state()
 
 _MONEDA: str = st.session_state.get("moneda_principal", "CLP")
 
+# Etiquetas de visualización de buckets (para sugerencias y desglose)
+_BUCKET_LABELS: dict[str, str] = {
+    "GAS_ESE_BUCKET": "Esenciales",
+    "GAS_IMP_BUCKET": "Importantes",
+    "GAS_ASP_BUCKET": "Aspiraciones",
+}
+
 
 def _fmt(v: float) -> str:
     """Formatea un monto en la moneda principal del usuario."""
@@ -70,6 +77,78 @@ def _numinput(label: str, value: float, key: str, **kwargs) -> float:
 def _pos(pid: str) -> dict:
     """Retorna los parámetros de una posición o {} si no existe."""
     return state.get_position(pid) or {}
+
+
+def _aplicar_sugerencia(sug: dict) -> None:
+    """Aplica una sugerencia: vincula la posición al bucket y ajusta si excede.
+
+    Args:
+        sug: Dict de sugerencia (de ``sugerencias_pendientes``).
+    """
+    id_pos = sug["id_posicion"]
+    bucket_id = sug["bucket"]
+    cuota_clp = float(sug["monto"])
+
+    pos = state.get_position(id_pos)
+    if pos is None:
+        _sugs: list = st.session_state.get("sugerencias_pendientes", [])
+        st.session_state["sugerencias_pendientes"] = [
+            s for s in _sugs if s["id"] != sug["id"]
+        ]
+        return
+
+    # Si la cuota excede el espacio disponible, incrementar el bucket
+    if sug.get("excede_espacio", False):
+        _bucket_pos = state.get_position(bucket_id) or {}
+        _exceso = float(sug.get("exceso_clp", 0.0))
+        _nuevo_monto = float(_bucket_pos.get("Monto_Mensual", 0.0)) + _exceso
+        state.set_position(bucket_id, {**_bucket_pos, "Monto_Mensual": _nuevo_monto})
+
+    # Vincular la posición al bucket con la cuota calculada
+    state.set_position(id_pos, {
+        **pos,
+        "bucket_vinculado": bucket_id,
+        "Cuota_Vinculada_CLP": cuota_clp,
+    })
+
+    # Remover la sugerencia de la lista
+    _sugs_after: list = st.session_state.get("sugerencias_pendientes", [])
+    st.session_state["sugerencias_pendientes"] = [
+        s for s in _sugs_after if s["id"] != sug["id"]
+    ]
+    state.mark_dirty()
+
+
+def _bucket_desglose_md(bucket_id: str, monto: float) -> str:
+    """Genera texto markdown de desglose de un bucket con sus posiciones vinculadas.
+
+    Args:
+        bucket_id: ID del bucket (``"GAS_ESE_BUCKET"`` etc.).
+        monto: Monto total del bucket en la moneda principal.
+
+    Returns:
+        String markdown con el desglose (vinculado + resto) o el monto simple.
+    """
+    positions = st.session_state.get("positions", {})
+    vinculadas = [
+        (pid, p)
+        for pid, p in positions.items()
+        if p.get("bucket_vinculado") == bucket_id
+    ]
+    if not vinculadas:
+        return _fmt(monto)
+
+    label = _BUCKET_LABELS.get(bucket_id, bucket_id)
+    lines = [f"**{label}: {_fmt(monto)}**"]
+    total_vinculado = 0.0
+    for pid, p in vinculadas:
+        cuota = float(p.get("Cuota_Vinculada_CLP", 0))
+        desc = p.get("Descripcion", pid)
+        lines.append(f"&nbsp;&nbsp;└ {desc} *(calculado)*: $ {int(cuota):,}")
+        total_vinculado += cuota
+    resto = monto - total_vinculado
+    lines.append(f"&nbsp;&nbsp;└ Resto estimado: {_fmt(max(0.0, resto))}")
+    return "  \n".join(lines)
 
 
 @st.cache_resource
@@ -270,11 +349,71 @@ with _metrics_ph.container():
         value=_fmt(_margen),
         delta_color="normal" if _margen > 0 else "inverse",
     )
+
+    # Mostrar desglose de buckets si alguno tiene posiciones vinculadas
+    _positions_all = st.session_state.get("positions", {})
+    _any_vinculado = any(p.get("bucket_vinculado") for p in _positions_all.values())
+    if _any_vinculado:
+        st.markdown(
+            _bucket_desglose_md("GAS_ESE_BUCKET", live_ese) + "  \n" +
+            _bucket_desglose_md("GAS_IMP_BUCKET", live_imp) + "  \n" +
+            _bucket_desglose_md("GAS_ASP_BUCKET", live_asp),
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption(
+            f"Esenciales {_fmt(live_ese)}  ·  "
+            f"Importantes {_fmt(live_imp)}  ·  "
+            f"Aspiraciones {_fmt(live_asp)}"
+        )
+
+# ── Sugerencias pendientes ────────────────────────────────────────────────────
+
+_sugerencias_c1 = st.session_state.get("sugerencias_pendientes", [])
+if _sugerencias_c1:
+    st.divider()
+    st.markdown(f"#### 💡 Sugerencias pendientes ({len(_sugerencias_c1)})")
     st.caption(
-        f"Esenciales {_fmt(live_ese)}  ·  "
-        f"Importantes {_fmt(live_imp)}  ·  "
-        f"Aspiraciones {_fmt(live_asp)}"
+        "Estas sugerencias te ayudan a desglosar tus buckets de gasto "
+        "con los compromisos reales que registraste en Capa 2."
     )
+    for _sug_c1 in list(_sugerencias_c1):
+        _sug_id_c1 = _sug_c1["id"]
+        _bucket_lbl_c1 = _BUCKET_LABELS.get(_sug_c1["bucket"], _sug_c1["bucket"])
+        _monto_clp_c1 = f"$ {int(_sug_c1['monto']):,}"
+        with st.container():
+            _col_sug_c1, _col_btns_c1 = st.columns([4, 2])
+            with _col_sug_c1:
+                st.markdown(
+                    f"**{_sug_c1['descripcion']}** · *{_sug_c1['tipo']}*  \n"
+                    f"Vincular cuota **{_monto_clp_c1}/mes** → {_bucket_lbl_c1}"
+                )
+                if _sug_c1.get("excede_espacio", False):
+                    st.warning(
+                        f"⚠️ Tu {_sug_c1['tipo']} real es "
+                        f"**$ {int(_sug_c1.get('exceso_clp', 0)):,}** "
+                        f"mayor que lo disponible en {_bucket_lbl_c1}. "
+                        "Aplicar ajustará el bucket automáticamente."
+                    )
+            with _col_btns_c1:
+                if st.button(
+                    "✓ Aplicar",
+                    key=f"sug1_ap_{_sug_id_c1}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    _aplicar_sugerencia(_sug_c1)
+                    st.rerun()
+                if st.button(
+                    "✕ Descartar",
+                    key=f"sug1_dc_{_sug_id_c1}",
+                    use_container_width=True,
+                ):
+                    st.session_state["sugerencias_pendientes"] = [
+                        s for s in st.session_state.get("sugerencias_pendientes", [])
+                        if s["id"] != _sug_id_c1
+                    ]
+                    st.rerun()
 
 # ── Footer — Guardar + Banner Capa 2 ─────────────────────────────────────────
 

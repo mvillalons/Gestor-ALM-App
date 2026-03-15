@@ -181,6 +181,70 @@ ALM completo, stress testing, módulo EB2-NIW, exportación de reportes.
 
 ---
 
+## Modelo de Desagregación de Buckets
+
+### Principio
+
+Los buckets de Capa 1 (Esenciales / Importantes / Aspiraciones) comienzan como
+estimados agregados ingresados por el usuario. Al registrar pasivos en Capa 2,
+el sistema **sugiere desglosarlos automáticamente** para que el bucket refleje la
+realidad en lugar de una estimación.
+
+### Flujo al agregar un pasivo
+
+1. El motor calcula la cuota mensual del pasivo en CLP.
+2. Determina el bucket sugerido según el tipo:
+
+   | Tipo de pasivo | Bucket sugerido |
+   |---|---|
+   | Hipotecario / Colegio | Esenciales |
+   | Crédito consumo / Tarjeta | Importantes |
+   | APV | Aspiraciones |
+
+3. Muestra la sugerencia de desagregación **inmediatamente** después de confirmar el pasivo.
+4. Si el usuario **acepta**: el bucket se divide en dos sub-ítems:
+   - `vinculado (calculado)` — monto exacto de la cuota, no editable.
+   - `resto (estimado)` — diferencia hasta el total anterior, editable.
+5. Si el usuario **ignora**: la sugerencia se persiste en
+   `st.session_state["sugerencias_pendientes"]` y vuelve a aparecer en el dashboard.
+
+### Estructura de sugerencias pendientes
+
+```python
+# Clave en session_state
+st.session_state["sugerencias_pendientes"]: list[dict] = [
+    {
+        "id": str,           # UUID local de la sugerencia
+        "tipo": str,         # "Hipotecario" | "Crédito consumo" | etc.
+        "descripcion": str,  # descripción del pasivo
+        "monto": float,      # cuota mensual en CLP
+        "bucket": str,       # "GAS_ESE_BUCKET" | "GAS_IMP_BUCKET" | "GAS_ASP_BUCKET"
+        "id_posicion": str,  # ID del pasivo que generó la sugerencia
+    }
+]
+```
+
+- Visibles en el dashboard de **Capa 1** (banner amarillo) y **Capa 2** (sección inferior).
+- El usuario puede hacer **Revisar** (acepta la desagregación) o **Descartar** (elimina
+  la sugerencia sin cambiar el bucket).
+- Al descartar: se elimina de la lista y **no vuelve a aparecer** para ese `id_posicion`.
+
+### Alerta de diferencia presupuestaria
+
+Si `cuota_real > espacio_disponible_en_bucket` (es decir, el monto del pasivo supera
+lo estimado en el bucket correspondiente):
+
+```
+⚠️ Tu [tipo] real es $ X mayor que lo estimado en [Esenciales / Importantes].
+   ¿Ajustamos el bucket?   [Ajustar]  [Ignorar]
+```
+
+La alerta se muestra como `st.warning()` con botones en línea, tanto en Capa 1 como
+en Capa 2. Si el usuario acepta "Ajustar", el bucket se incrementa automáticamente
+al valor real y se marca `dirty = True`.
+
+---
+
 ## Gestión de estado y guardado
 
 ```python
@@ -263,12 +327,13 @@ Responde SOLO en JSON: {"ID_Posicion": "...", "Tipo_Flujo": "importado",
 
 | Fase | Capa | Estado |
 |---|---|---|
-| Fase 1 | Capa 1 | ✅ Base lista — auth Drive, CSVs de ejemplo, dashboard básico |
-| Fase 2 | Capa 2-A | 🔄 En desarrollo — registro de pasivos + tablas de desarrollo |
-| Fase 3 | Capa 2-B | 📋 Planificada — integración AFP |
-| Fase 4 | Capa 3-A | 📋 Planificada — motor de objetivos |
-| Fase 5 | Capa 3-B | 📋 Planificada — agente parser cartolas |
-| Fase 6 | Capa 4 | 📋 Planificada — ALM completo |
+| Fase 1 | Capa 1 | ✅ Completa — auth Drive, CSVs, dashboard, métricas |
+| Fase 2 | Capa 2-A | ✅ Completa — pasivos (5 tipos), tablas de desarrollo, LTV, normalización FX |
+| Fase 3 | Capa 2-B | ✅ Completa — AFP + APV + resumen previsional consolidado |
+| Fase 4 | Capa 2-C | 📋 Planificada — desagregación de buckets (modelo documentado) |
+| Fase 5 | Capa 3-A | 📋 Planificada — motor de objetivos |
+| Fase 6 | Capa 3-B | 📋 Planificada — agente parser cartolas |
+| Fase 7 | Capa 4 | 📋 Planificada — ALM completo |
 
 ---
 

@@ -11,6 +11,7 @@ from core.schedule import (
     gen_afp,
     gen_colegio,
     gen_credito_consumo,
+    gen_fondo_inversion,
     gen_hipotecario,
     gen_tarjeta,
 )
@@ -802,3 +803,127 @@ class TestFlujoNetoMensualMultiMoneda:
         df_b = flujo_neto_mensual([t], self.INGRESO, valor_uf=40_000.0, valor_usd=_USD_TEST)
         # 40k UF → flujo más negativo
         assert df_b["Flujo_Pasivos"].iloc[0] < df_a["Flujo_Pasivos"].iloc[0]
+
+
+# ---------------------------------------------------------------------------
+# gen_fondo_inversion
+# ---------------------------------------------------------------------------
+
+
+class TestGenFondoInversion:
+    """Tests para gen_fondo_inversion — proyección de APV / fondos mutuos."""
+
+    FECHA = date(2026, 4, 1)
+    SALDO = 5_000_000.0
+    APORTE = 100_000.0
+    TASA = 0.05       # 5 % anual
+    HORIZONTE = 12    # 12 meses
+
+    def _gen(self, **kwargs):
+        defaults = dict(
+            saldo=self.SALDO,
+            aporte_mensual=self.APORTE,
+            tasa_anual=self.TASA,
+            horizonte_meses=self.HORIZONTE,
+            fecha_inicio=self.FECHA,
+        )
+        defaults.update(kwargs)
+        return gen_fondo_inversion(**defaults)
+
+    # ── Estructura ────────────────────────────────────────────────────────────
+
+    def test_numero_de_filas_igual_a_horizonte(self):
+        df = self._gen()
+        assert len(df) == self.HORIZONTE
+
+    def test_columnas_estandar(self):
+        df = self._gen()
+        assert list(df.columns) == COLS_TABLA_DESARROLLO
+
+    def test_id_posicion_en_columna(self):
+        df = self._gen(id_posicion="APV_TEST")
+        assert (df["ID_Posicion"] == "APV_TEST").all()
+
+    def test_moneda_en_columna(self):
+        df = self._gen(moneda="CLP")
+        assert (df["Moneda"] == "CLP").all()
+
+    def test_tipo_flujo_calculado(self):
+        df = self._gen()
+        assert (df["Tipo_Flujo"] == "calculado").all()
+
+    # ── Lógica financiera ─────────────────────────────────────────────────────
+
+    def test_saldo_crece_con_tiempo(self):
+        """El saldo final debe crecer cada mes con aporte y rentabilidad."""
+        df = self._gen()
+        assert df["Saldo_Final"].is_monotonic_increasing
+
+    def test_saldo_final_mayor_que_inicial(self):
+        df = self._gen()
+        assert df["Saldo_Final"].iloc[-1] > self.SALDO
+
+    def test_aporte_negativo_en_flujo_periodo(self):
+        """Flujo_Periodo es negativo (egreso del usuario)."""
+        df = self._gen()
+        assert (df["Flujo_Periodo"] <= 0).all()
+        assert (df["Flujo_Periodo"] == -self.APORTE).all()
+
+    def test_rendimiento_positivo(self):
+        """Rendimiento_Costo es positivo (crecimiento del fondo)."""
+        df = self._gen()
+        assert (df["Rendimiento_Costo"] >= 0).all()
+
+    def test_tasa_cero_crecimiento_lineal(self):
+        """Con tasa=0 el saldo crece solo por aportes (sin rentabilidad)."""
+        df = self._gen(tasa_anual=0.0)
+        assert (df["Rendimiento_Costo"] == 0.0).all()
+        saldo_esperado = self.SALDO + self.APORTE * self.HORIZONTE
+        assert abs(df["Saldo_Final"].iloc[-1] - saldo_esperado) < 1.0
+
+    def test_aporte_cero_solo_rentabilidad(self):
+        """Con aporte=0 el saldo crece solo por rentabilidad compuesta."""
+        df = self._gen(aporte_mensual=0.0)
+        assert (df["Flujo_Periodo"] == 0.0).all()
+        tasa_mensual = self.TASA / 12
+        saldo_esperado = self.SALDO * (1 + tasa_mensual) ** self.HORIZONTE
+        assert abs(df["Saldo_Final"].iloc[-1] - saldo_esperado) < 10.0
+
+    def test_saldo_inicial_cero(self):
+        """Con saldo=0 y aportes, el primer saldo_inicial es 0."""
+        df = self._gen(saldo=0.0)
+        assert df["Saldo_Inicial"].iloc[0] == 0.0
+        assert df["Saldo_Final"].iloc[-1] > 0
+
+    def test_saldo_inicial_correcto_en_filas(self):
+        """Saldo_Inicial de cada fila = Saldo_Final de la fila anterior."""
+        df = self._gen()
+        for i in range(1, len(df)):
+            assert abs(df["Saldo_Inicial"].iloc[i] - df["Saldo_Final"].iloc[i - 1]) < 0.01
+
+    def test_horizonte_mayor_genera_mas_filas(self):
+        df_12 = self._gen(horizonte_meses=12)
+        df_24 = self._gen(horizonte_meses=24)
+        assert len(df_24) == 2 * len(df_12)
+
+    # ── Validaciones ──────────────────────────────────────────────────────────
+
+    def test_saldo_negativo_raises(self):
+        with pytest.raises(ValueError, match="saldo"):
+            self._gen(saldo=-1.0)
+
+    def test_aporte_negativo_raises(self):
+        with pytest.raises(ValueError, match="aporte_mensual"):
+            self._gen(aporte_mensual=-100.0)
+
+    def test_tasa_negativa_raises(self):
+        with pytest.raises(ValueError, match="tasa_anual"):
+            self._gen(tasa_anual=-0.01)
+
+    def test_horizonte_cero_raises(self):
+        with pytest.raises(ValueError, match="horizonte_meses"):
+            self._gen(horizonte_meses=0)
+
+    def test_horizonte_negativo_raises(self):
+        with pytest.raises(ValueError, match="horizonte_meses"):
+            self._gen(horizonte_meses=-5)

@@ -71,6 +71,19 @@ _FORM_KEYS: list[str] = [
 
 _MONEDA: str = st.session_state.get("moneda_principal", "CLP")
 
+# Etiquetas de visualización de buckets (para sugerencias y desglose)
+_BUCKET_LABELS: dict[str, str] = {
+    "GAS_ESE_BUCKET": "Esenciales",
+    "GAS_IMP_BUCKET": "Importantes",
+    "GAS_ASP_BUCKET": "Aspiraciones",
+}
+
+# Tipos de cambio leídos temprano — disponibles en TODA la página (columnas izq/der).
+# El usuario los actualiza en el expander "⚙️ Tipo de cambio" de la columna izquierda.
+# El cambio toma efecto en el siguiente rerun (patrón estándar de Streamlit).
+_valor_uf: float = float(st.session_state.get("valor_uf", 39_700.0))
+_valor_usd: float = float(st.session_state.get("valor_usd", 950.0))
+
 
 def _fmt(v: float) -> str:
     """Formatea un monto en la moneda principal del usuario."""
@@ -91,6 +104,15 @@ def _all_pasivo_ids() -> list[str]:
     ids = state.list_positions(clase="Pasivo_Estructural")
     ids += state.list_positions(clase="Pasivo_Corto_Plazo")
     return ids
+
+
+def _all_apv_ids() -> list[str]:
+    """Lista todos los IDs de APVs registrados (clase Activo_Financiero, prefijo APV_)."""
+    return [
+        pid
+        for pid in state.list_positions(clase="Activo_Financiero")
+        if pid.startswith("APV_")
+    ]
 
 
 def _cuota_actual(id_pos: str) -> float:
@@ -226,7 +248,53 @@ def _eliminar_pasivo(id_pos: str) -> None:
     pac: list = st.session_state.get("pasivos_con_tabla", [])
     if id_pos in pac:
         pac.remove(id_pos)
+    # Eliminar también cualquier sugerencia pendiente para esta posición
+    sugs: list = st.session_state.get("sugerencias_pendientes", [])
+    st.session_state["sugerencias_pendientes"] = [
+        s for s in sugs if s.get("id_posicion") != id_pos
+    ]
     state.update_layer()
+
+
+def _aplicar_sugerencia(sug: dict) -> None:
+    """Aplica una sugerencia: vincula la posición al bucket y ajusta si excede.
+
+    Args:
+        sug: Dict de sugerencia (de ``sugerencias_pendientes``).
+    """
+    id_pos = sug["id_posicion"]
+    bucket_id = sug["bucket"]
+    cuota_clp = float(sug["monto"])
+
+    pos = state.get_position(id_pos)
+    if pos is None:
+        # La posición ya no existe — limpiar silenciosamente
+        _sugs: list = st.session_state.get("sugerencias_pendientes", [])
+        st.session_state["sugerencias_pendientes"] = [
+            s for s in _sugs if s["id"] != sug["id"]
+        ]
+        return
+
+    # Si la cuota excede el espacio disponible, incrementar el bucket
+    if sug.get("excede_espacio", False):
+        _bucket_pos = state.get_position(bucket_id) or {}
+        _exceso = float(sug.get("exceso_clp", 0.0))
+        _nuevo_monto = float(_bucket_pos.get("Monto_Mensual", 0.0)) + _exceso
+        state.set_position(bucket_id, {**_bucket_pos, "Monto_Mensual": _nuevo_monto})
+
+    # Vincular la posición al bucket con la cuota calculada
+    state.set_position(id_pos, {
+        **pos,
+        "bucket_vinculado": bucket_id,
+        "Cuota_Vinculada_CLP": cuota_clp,
+    })
+
+    # Remover la sugerencia de la lista
+    _sugs_after: list = st.session_state.get("sugerencias_pendientes", [])
+    st.session_state["sugerencias_pendientes"] = [
+        s for s in _sugs_after if s["id"] != sug["id"]
+    ]
+    state.mark_dirty()
 
 
 def _abrir_formulario_pasivo(edit_id: str | None = None) -> None:
@@ -631,7 +699,50 @@ with col_right:
                 # Generar tabla de desarrollo
                 tabla = _generar_tabla(tipo, params_nuevos, id_final)
                 if tabla is not None:
+                    # ── Cuota en CLP para sugerencias y vinculación ──────────
+                    _hoy_sug = date.today().strftime("%Y-%m")
+                    _fut_sug = tabla[tabla["Periodo"] >= _hoy_sug]
+                    _cuota_mon_sug = (
+                        abs(float(_fut_sug["Flujo_Periodo"].iloc[0]))
+                        if not _fut_sug.empty else 0.0
+                    )
+                    _cuota_clp_sug = calculator.normalizar_a_clp(
+                        _cuota_mon_sug, moneda_pas, _valor_uf, _valor_usd
+                    )
+
+                    # Carry over vinculación existente en edición (no perder el link)
+                    if edit_id:
+                        _old_pos_sug = state.get_position(id_final) or {}
+                        if _old_pos_sug.get("bucket_vinculado"):
+                            params_nuevos["bucket_vinculado"] = _old_pos_sug["bucket_vinculado"]
+                            params_nuevos["Cuota_Vinculada_CLP"] = _cuota_clp_sug
+
                     _registrar_pasivo(id_final, params_nuevos, tabla)
+
+                    # Crear sugerencia solo si la posición no está ya vinculada
+                    if not params_nuevos.get("bucket_vinculado") and _cuota_clp_sug > 0:
+                        _bucket_sug = calculator.bucket_sugerido(tipo)
+                        _espacio_sug = calculator.espacio_disponible_bucket(
+                            st.session_state, _bucket_sug
+                        )
+                        _sugs_list: list = st.session_state.setdefault(
+                            "sugerencias_pendientes", []
+                        )
+                        # Actualizar si ya existe una sugerencia para esta posición
+                        _sugs_list[:] = [
+                            s for s in _sugs_list if s.get("id_posicion") != id_final
+                        ]
+                        _sugs_list.append({
+                            "id": id_final,
+                            "tipo": tipo,
+                            "descripcion": descripcion.strip(),
+                            "monto": _cuota_clp_sug,
+                            "bucket": _bucket_sug,
+                            "id_posicion": id_final,
+                            "excede_espacio": _cuota_clp_sug > _espacio_sug,
+                            "exceso_clp": max(0.0, _cuota_clp_sug - _espacio_sug),
+                        })
+
                     st.session_state["c2_show_add_form"] = False
                     st.session_state.pop("c2_edit_id", None)
                     st.success(f"✓ {'Actualizado' if edit_id else 'Agregado'}: {descripcion}")
@@ -652,9 +763,27 @@ with col_right:
             with st.container():
                 c1, c2, c3 = st.columns([5, 1, 1])
                 with c1:
+                    moneda_p = pparams.get("Moneda", "CLP")
+                    if moneda_p == "UF":
+                        _saldo_clp = int(calculator.normalizar_a_clp(
+                            saldo_p, "UF", _valor_uf, _valor_usd))
+                        _cuota_clp = int(calculator.normalizar_a_clp(
+                            cuota_p, "UF", _valor_uf, _valor_usd))
+                        _saldo_str = f"UF {saldo_p:,.2f} → $ {_saldo_clp:,}"
+                        _cuota_str = f"UF {cuota_p:,.2f} → $ {_cuota_clp:,}"
+                    elif moneda_p == "USD":
+                        _saldo_clp = int(calculator.normalizar_a_clp(
+                            saldo_p, "USD", _valor_uf, _valor_usd))
+                        _cuota_clp = int(calculator.normalizar_a_clp(
+                            cuota_p, "USD", _valor_uf, _valor_usd))
+                        _saldo_str = f"USD {saldo_p:,.0f} → $ {_saldo_clp:,}"
+                        _cuota_str = f"USD {cuota_p:,.0f} → $ {_cuota_clp:,}"
+                    else:
+                        _saldo_str = _fmt(saldo_p)
+                        _cuota_str = _fmt(cuota_p)
                     st.markdown(
                         f"**{desc_p}** · *{tipo_p}*  \n"
-                        f"Saldo {_fmt(saldo_p)} · Cuota {_fmt(cuota_p)}/mes · "
+                        f"Saldo {_saldo_str} · Cuota {_cuota_str}/mes · "
                         f"Término {termino_p}"
                     )
                     # LTV y patrimonio neto para hipotecarios con activo registrado
@@ -841,14 +970,228 @@ with col_right:
                 except Exception as exc:
                     st.error(f"Error al generar proyección AFP: {exc}")
 
+    # ── Sección APV ───────────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("#### 📈 APV (Ahorro Previsional Voluntario)")
+
+    apv_ids = _all_apv_ids()
+
+    if not st.session_state.get("c2_show_apv_form", False):
+        if st.button("➕ Agregar APV", use_container_width=True, key="btn_add_apv"):
+            for _k in ["c2_apv_inst", "c2_apv_saldo", "c2_apv_aporte",
+                       "c2_apv_regimen", "c2_apv_tasa"]:
+                st.session_state.pop(_k, None)
+            st.session_state["c2_show_apv_form"] = True
+            st.session_state.pop("c2_edit_apv_id", None)
+            st.rerun()
+
+    # Lista de APVs registrados
+    if apv_ids:
+        for apv_id in apv_ids:
+            apv_p = _pos(apv_id)
+            apv_saldo_val = float(apv_p.get("Saldo_Actual", 0))
+            apv_tabla = st.session_state.get("schedules", {}).get(apv_id)
+            apv_proy = (
+                float(apv_tabla["Saldo_Final"].iloc[-1])
+                if apv_tabla is not None and not apv_tabla.empty
+                else apv_saldo_val
+            )
+            c_apv1, c_apv2, c_apv3 = st.columns([5, 1, 1])
+            with c_apv1:
+                st.markdown(
+                    f"**{apv_p.get('Descripcion', apv_id)}** · "
+                    f"Saldo {_fmt(apv_saldo_val)} · "
+                    f"Proyección {_fmt(apv_proy)}"
+                )
+                _reg = apv_p.get("Regimen_Tributario", "")
+                if _reg:
+                    st.caption(f"Régimen {_reg} · Tasa {apv_p.get('Tasa_Anual_Pct', 5.0):.1f}% anual")
+            with c_apv2:
+                if st.button("✏️", key=f"edit_apv_{apv_id}", help="Editar"):
+                    st.session_state["c2_show_apv_form"] = True
+                    st.session_state["c2_edit_apv_id"] = apv_id
+                    st.rerun()
+            with c_apv3:
+                if st.button("🗑️", key=f"del_apv_{apv_id}", help="Eliminar"):
+                    state.delete_position(apv_id)
+                    st.session_state.get("schedules", {}).pop(apv_id, None)
+                    state.mark_dirty()
+                    st.rerun()
+    elif not st.session_state.get("c2_show_apv_form", False):
+        st.caption("Sin APVs registrados. El APV complementa tu AFP con ahorro voluntario.")
+
+    # Formulario APV
+    if st.session_state.get("c2_show_apv_form", False):
+        edit_apv_id: str | None = st.session_state.get("c2_edit_apv_id")
+        apv_edit_p = state.get_position(edit_apv_id) or {} if edit_apv_id else {}
+        modo_apv = "✏️ Editar APV" if edit_apv_id else "➕ Nuevo APV"
+
+        with st.form("form_apv"):
+            st.markdown(f"**{modo_apv}**")
+            ca1_apv, ca2_apv = st.columns(2)
+            with ca1_apv:
+                apv_inst = st.text_input(
+                    "Institución",
+                    value=apv_edit_p.get("Descripcion", ""),
+                    key="c2_apv_inst",
+                    placeholder="Ej: Habitat, Cuprum, BCI…",
+                )
+                apv_saldo_in = st.number_input(
+                    "Saldo actual (CLP)",
+                    min_value=0, step=500_000,
+                    value=int(apv_edit_p.get("Saldo_Actual", 0)),
+                    key="c2_apv_saldo",
+                )
+                apv_aporte_in = st.number_input(
+                    "Aporte mensual (CLP)",
+                    min_value=0, step=10_000,
+                    value=int(apv_edit_p.get("Aporte_Mensual", 0)),
+                    key="c2_apv_aporte",
+                )
+            with ca2_apv:
+                _regimenes = ["A", "B", "Sin régimen"]
+                _reg_def = apv_edit_p.get("Regimen_Tributario", "A")
+                if _reg_def not in _regimenes:
+                    _reg_def = "A"
+                apv_regimen = st.selectbox(
+                    "Régimen tributario",
+                    _regimenes,
+                    index=_regimenes.index(_reg_def),
+                    key="c2_apv_regimen",
+                    help="A: retiro exento de impuesto. B: descuenta base imponible al aportar.",
+                )
+                apv_tasa_in = st.number_input(
+                    "Rentabilidad anual esperada (%)",
+                    min_value=0.0, max_value=20.0,
+                    value=float(apv_edit_p.get("Tasa_Anual_Pct", 5.0)),
+                    step=0.5, format="%.1f", key="c2_apv_tasa",
+                    help="Promedio histórico APV conservador en CLP: ~4–6 %",
+                )
+
+            c_ok_apv, c_can_apv = st.columns(2)
+            with c_ok_apv:
+                apv_ok = st.form_submit_button(
+                    "✓ Guardar APV", type="primary", use_container_width=True
+                )
+            with c_can_apv:
+                apv_can = st.form_submit_button("✕ Cancelar", use_container_width=True)
+
+            if apv_can:
+                st.session_state["c2_show_apv_form"] = False
+                st.session_state.pop("c2_edit_apv_id", None)
+                st.rerun()
+
+            if apv_ok:
+                if not apv_inst.strip():
+                    st.error("La institución no puede estar vacía.")
+                    st.stop()
+
+                # Horizonte: hasta jubilación AFP (si existe) o 20 años por defecto
+                _afp_p_hz = _pos("AFP_PRINCIPAL")
+                _edad_act_hz = float(_afp_p_hz.get("Edad_Actual", 35))
+                _edad_jub_hz = float(_afp_p_hz.get("Edad_Jubilacion", 65))
+                _horizonte_apv = max(1, round((_edad_jub_hz - _edad_act_hz) * 12))
+
+                _apv_suffix = (
+                    apv_inst.strip().upper()
+                    .replace(" ", "_").replace(".", "").replace(",", "")[:20]
+                )
+                apv_id_final = edit_apv_id if edit_apv_id else f"APV_{_apv_suffix}"
+
+                params_apv = {
+                    "Tipo": "APV",
+                    "Clase": "Activo_Financiero",
+                    "Descripcion": apv_inst.strip(),
+                    "Moneda": "CLP",
+                    "Capa_Activacion": 2,
+                    "Saldo_Actual": apv_saldo_in,
+                    "Aporte_Mensual": apv_aporte_in,
+                    "Tasa_Anual": apv_tasa_in / 100,
+                    "Tasa_Anual_Pct": apv_tasa_in,
+                    "Regimen_Tributario": apv_regimen,
+                    "Fecha_Inicio": date.today().isoformat(),
+                }
+                try:
+                    tabla_apv_nueva = schedule.gen_fondo_inversion(
+                        saldo=float(apv_saldo_in),
+                        aporte_mensual=float(apv_aporte_in),
+                        tasa_anual=apv_tasa_in / 100,
+                        horizonte_meses=_horizonte_apv,
+                        fecha_inicio=date.today(),
+                        moneda="CLP",
+                        id_posicion=apv_id_final,
+                    )
+                    state.set_position(apv_id_final, params_apv)
+                    st.session_state.setdefault("schedules", {})[apv_id_final] = tabla_apv_nueva
+                    state.mark_dirty()
+                    state.update_layer()
+                    st.session_state["c2_show_apv_form"] = False
+                    st.session_state.pop("c2_edit_apv_id", None)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Error al generar proyección APV: {exc}")
+
+    # ── Resumen previsional consolidado (AFP + APVs) ──────────────────────────
+    _afp_res = _pos("AFP_PRINCIPAL")
+    if _afp_res:
+        st.divider()
+        st.markdown("##### 📊 Resumen Previsional Consolidado")
+
+        _edad_jub_res = float(_afp_res.get("Edad_Jubilacion", 65))
+        _rows_resumen: list[dict] = []
+
+        # AFP
+        _tabla_afp_res = st.session_state.get("schedules", {}).get("AFP_PRINCIPAL")
+        _proy_afp_res = (
+            float(_tabla_afp_res["Saldo_Final"].iloc[-1])
+            if _tabla_afp_res is not None and not _tabla_afp_res.empty
+            else float(_afp_res.get("Saldo_Actual", 0))
+        )
+        _total_proy = _proy_afp_res
+        _rows_resumen.append({
+            "Instrumento": "AFP Principal",
+            "Saldo Actual": f"$ {int(float(_afp_res.get('Saldo_Actual', 0))):,}",
+            "Proyección jubilación": f"$ {int(_proy_afp_res):,}",
+        })
+
+        # APVs
+        for _apv_id_res in _all_apv_ids():
+            _apv_p_res = _pos(_apv_id_res)
+            _apv_tab_res = st.session_state.get("schedules", {}).get(_apv_id_res)
+            _proy_apv_res = (
+                float(_apv_tab_res["Saldo_Final"].iloc[-1])
+                if _apv_tab_res is not None and not _apv_tab_res.empty
+                else float(_apv_p_res.get("Saldo_Actual", 0))
+            )
+            _total_proy += _proy_apv_res
+            _rows_resumen.append({
+                "Instrumento": f"APV {_apv_p_res.get('Descripcion', _apv_id_res)}",
+                "Saldo Actual": f"$ {int(float(_apv_p_res.get('Saldo_Actual', 0))):,}",
+                "Proyección jubilación": f"$ {int(_proy_apv_res):,}",
+            })
+
+        import pandas as _pd  # noqa: PLC0415
+        st.dataframe(
+            _pd.DataFrame(_rows_resumen),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        col_tot, col_pen = st.columns(2)
+        with col_tot:
+            st.metric("💰 Total proyectado", f"$ {int(_total_proy):,}")
+        with col_pen:
+            _anos_pension = max(1.0, 85.0 - _edad_jub_res)
+            _pension_men = _total_proy / (_anos_pension * 12)
+            st.metric(
+                "📅 Pensión mensual estimada",
+                f"$ {int(_pension_men):,}",
+                help=f"Total ÷ ({85} − {int(_edad_jub_res)} años) ÷ 12 meses",
+            )
+
 # ────────────────────────────────────────────────────────────────────────────
 # MÉTRICAS — calculadas desde session_state; renderizadas en el placeholder
 # ────────────────────────────────────────────────────────────────────────────
-
-# Tipos de cambio para normalización a CLP (leídos desde session_state)
-# El usuario los ajusta en el expander "⚙️ Tipo de cambio" dentro del placeholder.
-_valor_uf: float = float(st.session_state.get("valor_uf", 39_700.0))
-_valor_usd: float = float(st.session_state.get("valor_usd", 950.0))
 
 # Datos base de Capa 1 — normalizados a CLP para comparabilidad entre monedas
 _ing = calculator.normalizar_a_clp(
@@ -896,14 +1239,15 @@ with _metrics_ph.container():
     # ── Tipo de cambio (configuración manual) ─────────────────────────────────
     with st.expander("⚙️ Tipo de cambio", expanded=False):
         st.caption(
-            "Valores usados para convertir UF y USD a CLP en todas las métricas. "
-            "Actualiza manualmente con el valor del día."
+            "El sistema usa estos valores para convertir flujos en UF y USD a CLP "
+            "en todas las métricas. Actualiza manualmente con el valor del día."
         )
         _col_uf, _col_usd = st.columns(2)
         with _col_uf:
             st.number_input(
                 "Valor UF (CLP/UF)",
                 min_value=1.0,
+                value=float(st.session_state.get("valor_uf", 39_700.0)),
                 step=100.0,
                 format="%.0f",
                 key="valor_uf",
@@ -913,6 +1257,7 @@ with _metrics_ph.container():
             st.number_input(
                 "Dólar USD (CLP/USD)",
                 min_value=1.0,
+                value=float(st.session_state.get("valor_usd", 950.0)),
                 step=10.0,
                 format="%.0f",
                 key="valor_usd",
@@ -1022,6 +1367,54 @@ with _metrics_ph.container():
     )
     if _all_pasivo_ids() and _horizonte != "—":
         st.caption(f"{len(_all_pasivo_ids())} compromisos registrados")
+
+# ── Sugerencias pendientes ────────────────────────────────────────────────────
+
+_sugerencias_c2 = st.session_state.get("sugerencias_pendientes", [])
+if _sugerencias_c2:
+    st.divider()
+    st.markdown(f"#### 💡 Sugerencias de desagregación ({len(_sugerencias_c2)})")
+    st.caption(
+        "Vincula las cuotas de tus compromisos a los buckets de gasto "
+        "para reflejar la realidad de tu presupuesto en Capa 1."
+    )
+    for _sug_c2 in list(_sugerencias_c2):
+        _sug_id_c2 = _sug_c2["id"]
+        _bucket_lbl_c2 = _BUCKET_LABELS.get(_sug_c2["bucket"], _sug_c2["bucket"])
+        _monto_clp_c2 = f"$ {int(_sug_c2['monto']):,}"
+        with st.container():
+            _col_sug_c2, _col_btns_c2 = st.columns([4, 2])
+            with _col_sug_c2:
+                st.markdown(
+                    f"**{_sug_c2['descripcion']}** · *{_sug_c2['tipo']}*  \n"
+                    f"Vincular cuota **{_monto_clp_c2}/mes** → {_bucket_lbl_c2}"
+                )
+                if _sug_c2.get("excede_espacio", False):
+                    st.warning(
+                        f"⚠️ Tu {_sug_c2['tipo']} real es "
+                        f"**$ {int(_sug_c2.get('exceso_clp', 0)):,}** "
+                        f"mayor que lo disponible en {_bucket_lbl_c2}. "
+                        "Aplicar ajustará el bucket automáticamente."
+                    )
+            with _col_btns_c2:
+                if st.button(
+                    "✓ Aplicar",
+                    key=f"sug2_ap_{_sug_id_c2}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    _aplicar_sugerencia(_sug_c2)
+                    st.rerun()
+                if st.button(
+                    "✕ Descartar",
+                    key=f"sug2_dc_{_sug_id_c2}",
+                    use_container_width=True,
+                ):
+                    st.session_state["sugerencias_pendientes"] = [
+                        s for s in st.session_state.get("sugerencias_pendientes", [])
+                        if s["id"] != _sug_id_c2
+                    ]
+                    st.rerun()
 
 # ── Footer — Guardar + Banner Capa 3 ─────────────────────────────────────────
 
