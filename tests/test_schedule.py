@@ -7,12 +7,14 @@ import pytest
 
 from core.schedule import (
     COLS_TABLA_DESARROLLO,
+    calcular_aporte_requerido,
     flujo_neto_mensual,
     gen_afp,
     gen_colegio,
     gen_credito_consumo,
     gen_fondo_inversion,
     gen_hipotecario,
+    gen_objetivo_ahorro,
     gen_tarjeta,
 )
 
@@ -882,12 +884,36 @@ class TestGenFondoInversion:
         assert abs(df["Saldo_Final"].iloc[-1] - saldo_esperado) < 1.0
 
     def test_aporte_cero_solo_rentabilidad(self):
-        """Con aporte=0 el saldo crece solo por rentabilidad compuesta."""
+        """Con aporte=0 el saldo crece solo por rentabilidad compuesta (tasa efectiva)."""
         df = self._gen(aporte_mensual=0.0)
         assert (df["Flujo_Periodo"] == 0.0).all()
-        tasa_mensual = self.TASA / 12
+        # Tasa efectiva mensual: componer 12 meses debe dar exactamente la tasa anual.
+        tasa_mensual = (1 + self.TASA) ** (1 / 12) - 1
         saldo_esperado = self.SALDO * (1 + tasa_mensual) ** self.HORIZONTE
         assert abs(df["Saldo_Final"].iloc[-1] - saldo_esperado) < 10.0
+
+    def test_tasa_efectiva_anual_12_meses(self):
+        """Con aporte=0, tasa=9% anual, 12 meses: saldo_final = saldo × 1.09 (±1 CLP)."""
+        df = gen_fondo_inversion(
+            saldo=1_000_000,
+            aporte_mensual=0,
+            tasa_anual=0.09,
+            horizonte_meses=12,
+            fecha_inicio=self.FECHA,
+        )
+        assert abs(df["Saldo_Final"].iloc[-1] - 1_090_000) < 1.0
+
+    def test_tasa_efectiva_anual_288_meses(self):
+        """Con aporte=0, tasa=9% anual, 288 meses: saldo_final = saldo × (1.09)^24 (±1000 CLP)."""
+        df = gen_fondo_inversion(
+            saldo=260_000_000,
+            aporte_mensual=0,
+            tasa_anual=0.09,
+            horizonte_meses=288,
+            fecha_inicio=self.FECHA,
+        )
+        expected = 260_000_000 * (1.09 ** 24)
+        assert abs(df["Saldo_Final"].iloc[-1] - expected) < 1_000
 
     def test_saldo_inicial_cero(self):
         """Con saldo=0 y aportes, el primer saldo_inicial es 0."""
@@ -927,3 +953,218 @@ class TestGenFondoInversion:
     def test_horizonte_negativo_raises(self):
         with pytest.raises(ValueError, match="horizonte_meses"):
             self._gen(horizonte_meses=-5)
+
+
+# ===========================================================================
+# calcular_aporte_requerido
+# ===========================================================================
+
+
+class TestCalcularAporteRequerido:
+    """Aporte mensual requerido para alcanzar una meta de ahorro."""
+
+    META = 1_200_000.0
+    PLAZO = 12
+    TASA = 0.06   # 6 % anual
+
+    # ── Casos sin rentabilidad ────────────────────────────────────────────────
+
+    def test_tasa_cero_sin_saldo(self):
+        """Con tasa=0 y saldo=0: aporte = meta / plazo."""
+        a = calcular_aporte_requerido(1_200_000, 12, 0.0, 0.0)
+        assert abs(a - 100_000.0) < 1e-4
+
+    def test_tasa_cero_con_saldo(self):
+        """Con tasa=0 y saldo > 0: aporte = (meta - saldo) / plazo."""
+        a = calcular_aporte_requerido(1_200_000, 12, 600_000, 0.0)
+        assert abs(a - 50_000.0) < 1e-4
+
+    def test_tasa_cero_saldo_igual_meta_retorna_cero(self):
+        """Si el saldo ya cubre la meta, el aporte es 0."""
+        a = calcular_aporte_requerido(1_000_000, 12, 1_000_000, 0.0)
+        assert a == 0.0
+
+    def test_tasa_cero_saldo_mayor_que_meta_retorna_cero(self):
+        a = calcular_aporte_requerido(500_000, 12, 600_000, 0.0)
+        assert a == 0.0
+
+    # ── Casos con rentabilidad ────────────────────────────────────────────────
+
+    def test_con_tasa_aporte_menor_que_sin_tasa(self):
+        """Con rentabilidad, el aporte requerido es menor (el saldo crece solo)."""
+        a_cero = calcular_aporte_requerido(self.META, self.PLAZO, 0.0, 0.0)
+        a_tasa = calcular_aporte_requerido(self.META, self.PLAZO, 0.0, self.TASA)
+        assert a_tasa < a_cero
+
+    def test_aporte_con_rentabilidad_produce_meta(self):
+        """Aplicar el aporte calculado debe acumular (aprox.) la meta."""
+        # Usar la misma tasa efectiva mensual que usa calcular_aporte_requerido.
+        r = (1 + self.TASA) ** (1 / 12) - 1
+        n = self.PLAZO
+        a = calcular_aporte_requerido(self.META, n, 0.0, self.TASA)
+        factor = (1 + r) ** n
+        fv = 0.0 * factor + a * (factor - 1) / r
+        assert abs(fv - self.META) < 1.0  # menos de 1 CLP de error
+
+    def test_saldo_cubre_meta_con_rentabilidad_retorna_cero(self):
+        """Si el saldo actual con rentabilidad ya supera la meta → 0."""
+        a = calcular_aporte_requerido(500_000, 12, 600_000, 0.05)
+        assert a == 0.0
+
+    def test_plazo_mayor_reduce_aporte(self):
+        """A mayor plazo, el aporte mensual requerido es menor."""
+        a12 = calcular_aporte_requerido(self.META, 12, 0.0, self.TASA)
+        a24 = calcular_aporte_requerido(self.META, 24, 0.0, self.TASA)
+        assert a24 < a12
+
+    def test_retorna_float(self):
+        a = calcular_aporte_requerido(self.META, self.PLAZO, 0.0, self.TASA)
+        assert isinstance(a, float)
+
+    # ── Validaciones ──────────────────────────────────────────────────────────
+
+    def test_meta_cero_falla(self):
+        with pytest.raises(ValueError, match="meta"):
+            calcular_aporte_requerido(0, self.PLAZO)
+
+    def test_meta_negativa_falla(self):
+        with pytest.raises(ValueError, match="meta"):
+            calcular_aporte_requerido(-100, self.PLAZO)
+
+    def test_plazo_cero_falla(self):
+        with pytest.raises(ValueError, match="plazo_meses"):
+            calcular_aporte_requerido(self.META, 0)
+
+    def test_saldo_negativo_falla(self):
+        with pytest.raises(ValueError, match="saldo_actual"):
+            calcular_aporte_requerido(self.META, self.PLAZO, -1.0)
+
+    def test_tasa_negativa_falla(self):
+        with pytest.raises(ValueError, match="tasa_anual"):
+            calcular_aporte_requerido(self.META, self.PLAZO, 0.0, -0.01)
+
+
+# ===========================================================================
+# gen_objetivo_ahorro
+# ===========================================================================
+
+
+class TestGenObjetivoAhorro:
+    """Tabla de desarrollo de un objetivo de ahorro."""
+
+    FECHA = date(2026, 4, 1)
+    META = 1_200_000.0
+    PLAZO = 12
+    SALDO = 0.0
+    TASA = 0.0
+
+    def _gen(self, **kwargs):
+        defaults = dict(
+            meta=self.META,
+            plazo_meses=self.PLAZO,
+            saldo_actual=self.SALDO,
+            tasa_anual=self.TASA,
+            fecha_inicio=self.FECHA,
+        )
+        defaults.update(kwargs)
+        return gen_objetivo_ahorro(**defaults)
+
+    # ── Estructura ────────────────────────────────────────────────────────────
+
+    def test_columnas_estandar(self):
+        assert list(self._gen().columns) == COLS_TABLA_DESARROLLO
+
+    def test_numero_de_filas_igual_a_plazo(self):
+        assert len(self._gen()) == self.PLAZO
+
+    def test_tipo_flujo_calculado(self):
+        assert (self._gen()["Tipo_Flujo"] == "calculado").all()
+
+    def test_id_posicion_propagado(self):
+        df = self._gen(id_posicion="OBJ_VIAJE")
+        assert (df["ID_Posicion"] == "OBJ_VIAJE").all()
+
+    def test_moneda_propagada(self):
+        df = self._gen(moneda="UF")
+        assert (df["Moneda"] == "UF").all()
+
+    def test_periodos_consecutivos(self):
+        df = self._gen(plazo_meses=6)
+        expected = [
+            f"2026-{m:02d}" for m in range(4, 10)
+        ]
+        assert list(df["Periodo"]) == expected
+
+    # ── Lógica financiera ─────────────────────────────────────────────────────
+
+    def test_saldo_final_aproxima_meta_tasa_cero(self):
+        """Con tasa=0, el saldo final debe ser ≈ meta."""
+        df = self._gen()
+        assert abs(df["Saldo_Final"].iloc[-1] - self.META) < 1.0
+
+    def test_saldo_final_aproxima_meta_con_tasa(self):
+        """Con rentabilidad, el saldo final también debe ≈ meta."""
+        df = self._gen(tasa_anual=0.06, saldo_actual=0.0)
+        assert abs(df["Saldo_Final"].iloc[-1] - self.META) < 1.0
+
+    def test_saldo_inicial_primera_fila(self):
+        """El saldo inicial de la primera fila = saldo_actual."""
+        df = self._gen(saldo_actual=300_000)
+        assert abs(df["Saldo_Inicial"].iloc[0] - 300_000) < 1e-4
+
+    def test_saldo_crece_con_tiempo(self):
+        """El saldo final debe crecer cada mes."""
+        df = self._gen()
+        assert df["Saldo_Final"].is_monotonic_increasing
+
+    def test_flujo_periodo_negativo(self):
+        """El aporte es un egreso del usuario → Flujo_Periodo negativo."""
+        df = self._gen()
+        assert (df["Flujo_Periodo"] <= 0).all()
+
+    def test_rendimiento_cero_cuando_tasa_cero(self):
+        df = self._gen(tasa_anual=0.0)
+        assert (df["Rendimiento_Costo"] == 0.0).all()
+
+    def test_rendimiento_positivo_cuando_tasa_positiva(self):
+        df = self._gen(tasa_anual=0.06, saldo_actual=100_000)
+        assert (df["Rendimiento_Costo"] >= 0).all()
+        # Al menos algunas filas deben tener rendimiento > 0
+        assert df["Rendimiento_Costo"].sum() > 0
+
+    def test_continuidad_saldos(self):
+        """Saldo_Final[i] == Saldo_Inicial[i+1]."""
+        df = self._gen()
+        for i in range(1, len(df)):
+            assert abs(df["Saldo_Inicial"].iloc[i] - df["Saldo_Final"].iloc[i - 1]) < 0.01
+
+    def test_saldo_ya_cubierto_aporte_cero(self):
+        """Si saldo >= meta, el aporte es 0 y el saldo sigue creciendo por rentabilidad."""
+        df = self._gen(saldo_actual=1_500_000, tasa_anual=0.0)
+        assert (df["Flujo_Periodo"] == 0.0).all()
+
+    def test_plazo_distinto_genera_filas_correctas(self):
+        df = self._gen(plazo_meses=24)
+        assert len(df) == 24
+
+    # ── Validaciones ──────────────────────────────────────────────────────────
+
+    def test_meta_cero_falla(self):
+        with pytest.raises(ValueError, match="meta"):
+            self._gen(meta=0)
+
+    def test_meta_negativa_falla(self):
+        with pytest.raises(ValueError, match="meta"):
+            self._gen(meta=-1)
+
+    def test_plazo_cero_falla(self):
+        with pytest.raises(ValueError, match="plazo_meses"):
+            self._gen(plazo_meses=0)
+
+    def test_saldo_negativo_falla(self):
+        with pytest.raises(ValueError, match="saldo_actual"):
+            self._gen(saldo_actual=-1)
+
+    def test_tasa_negativa_falla(self):
+        with pytest.raises(ValueError, match="tasa_anual"):
+            self._gen(tasa_anual=-0.01)

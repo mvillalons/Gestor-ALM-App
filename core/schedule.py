@@ -544,7 +544,9 @@ def gen_afp(
         )
 
     plazo: int = max(1, round((edad_jubilacion - edad_actual) * 12))
-    tasa_mensual: float = tasa_anual / 12
+    # Tasa efectiva mensual: (1 + tasa_anual)^(1/12) - 1
+    # Garantiza que componer 12 meses reproduce exactamente la tasa anual.
+    tasa_mensual: float = (1 + tasa_anual) ** (1 / 12) - 1
     fecha: date = _parse_fecha(fecha_inicio)
     saldo: float = float(saldo_actual)
     nota = (
@@ -565,6 +567,291 @@ def gen_afp(
                 "Saldo_Inicial": saldo_ini,
                 "Flujo_Periodo": round(-aporte_mensual, 2),  # egreso del usuario
                 "Rendimiento_Costo": rendimiento,             # positivo: crecimiento
+                "Amortizacion": 0.0,
+                "Saldo_Final": saldo,
+                "Moneda": moneda,
+                "Tipo_Flujo": "calculado",
+                "Notas": nota,
+            }
+        )
+        fecha = _next_month(fecha)
+
+    return pd.DataFrame(rows, columns=COLS_TABLA_DESARROLLO)
+
+
+# ---------------------------------------------------------------------------
+# Generación de tabla de desarrollo — Fondo de inversión (APV, ETF, fondos mutuos)
+# ---------------------------------------------------------------------------
+
+
+def gen_fondo_inversion(
+    saldo: float,
+    aporte_mensual: float,
+    tasa_anual: float,
+    horizonte_meses: int,
+    fecha_inicio: date | str,
+    moneda: str = "CLP",
+    id_posicion: str = "",
+) -> pd.DataFrame:
+    """Genera la proyección mensual de un fondo de inversión (APV, fondo mutuo, ETF, etc.).
+
+    El saldo crece cada mes por rentabilidad (``tasa_anual / 12``) y por el
+    aporte mensual.  A diferencia de :func:`gen_afp`, el horizonte se expresa
+    directamente en meses en lugar de derivarse de edades.
+
+    Convención de signos:
+        - ``Flujo_Periodo`` negativo (el aporte es un egreso del usuario).
+        - ``Rendimiento_Costo`` positivo (crecimiento del fondo).
+        - ``Saldo_Final`` crece con el tiempo.
+
+    Args:
+        saldo: Saldo inicial del fondo. Debe ser >= 0.
+        aporte_mensual: Aporte mensual. Puede ser 0 (sin nuevos aportes).
+        tasa_anual: Rentabilidad anual esperada como decimal (p. ej. 0.05 = 5 %).
+            Puede ser 0 (sin rentabilidad).
+        horizonte_meses: Número de meses de la proyección. Debe ser > 0.
+        fecha_inicio: Mes del primer período proyectado.
+        moneda: Código de moneda (``"CLP"``, ``"UF"``, ``"USD"``, …).
+        id_posicion: ID de la posición para poblar la columna ``ID_Posicion``.
+
+    Returns:
+        :class:`pandas.DataFrame` con columnas estándar de tabla de desarrollo.
+        Contiene exactamente ``horizonte_meses`` filas.
+
+    Raises:
+        ValueError: Si algún parámetro es inválido.
+
+    Examples:
+        >>> from datetime import date
+        >>> df = gen_fondo_inversion(
+        ...     saldo=5_000_000,
+        ...     aporte_mensual=100_000,
+        ...     tasa_anual=0.05,
+        ...     horizonte_meses=12,
+        ...     fecha_inicio=date(2026, 4, 1),
+        ... )
+        >>> len(df)
+        12
+        >>> df["Saldo_Final"].iloc[-1] > 5_000_000
+        True
+    """
+    if saldo < 0:
+        raise ValueError(f"saldo no puede ser negativo, se recibió {saldo}.")
+    if aporte_mensual < 0:
+        raise ValueError(
+            f"aporte_mensual no puede ser negativo, se recibió {aporte_mensual}."
+        )
+    if tasa_anual < 0:
+        raise ValueError(
+            f"tasa_anual no puede ser negativa, se recibió {tasa_anual}."
+        )
+    if horizonte_meses <= 0:
+        raise ValueError(
+            f"horizonte_meses debe ser mayor que cero, se recibió {horizonte_meses}."
+        )
+
+    # Tasa efectiva mensual: (1 + tasa_anual)^(1/12) - 1
+    # Garantiza que componer 12 meses reproduce exactamente la tasa anual.
+    tasa_mensual: float = (1 + tasa_anual) ** (1 / 12) - 1
+    fecha: date = _parse_fecha(fecha_inicio)
+    s: float = float(saldo)
+    nota = (
+        f"Aporte {moneda} {aporte_mensual:,.0f} | "
+        f"rentabilidad {tasa_anual * 100:.1f}% anual"
+    )
+    rows: list[dict] = []
+
+    for _ in range(horizonte_meses):
+        saldo_ini = s
+        rendimiento = round(saldo_ini * tasa_mensual, 2)
+        s = round(saldo_ini + rendimiento + aporte_mensual, 2)
+
+        rows.append(
+            {
+                "ID_Posicion": id_posicion,
+                "Periodo": fecha.strftime("%Y-%m"),
+                "Saldo_Inicial": saldo_ini,
+                "Flujo_Periodo": round(-aporte_mensual, 2),  # egreso del usuario
+                "Rendimiento_Costo": rendimiento,             # positivo: crecimiento
+                "Amortizacion": 0.0,
+                "Saldo_Final": s,
+                "Moneda": moneda,
+                "Tipo_Flujo": "calculado",
+                "Notas": nota,
+            }
+        )
+        fecha = _next_month(fecha)
+
+    return pd.DataFrame(rows, columns=COLS_TABLA_DESARROLLO)
+
+
+# ---------------------------------------------------------------------------
+# Objetivo de ahorro — cálculo de aporte requerido + tabla de desarrollo
+# ---------------------------------------------------------------------------
+
+
+def calcular_aporte_requerido(
+    meta: float,
+    plazo_meses: int,
+    saldo_actual: float = 0.0,
+    tasa_anual: float = 0.0,
+) -> float:
+    """Calcula el aporte mensual requerido para alcanzar una meta de ahorro.
+
+    Usa la fórmula de valor futuro con aportes periódicos al final de período:
+
+        FV = PV * (1 + r)^n + A * ((1 + r)^n - 1) / r
+
+    Despejando A:
+
+        A = (FV - PV * (1 + r)^n) * r / ((1 + r)^n - 1)
+
+    Cuando ``tasa_anual == 0``:
+
+        A = (meta - saldo_actual) / plazo_meses
+
+    Args:
+        meta: Monto objetivo a alcanzar. Debe ser > 0.
+        plazo_meses: Número de meses disponibles. Debe ser > 0.
+        saldo_actual: Saldo ya acumulado. Puede ser 0. Debe ser >= 0.
+        tasa_anual: Tasa de crecimiento anual esperada como decimal
+            (p. ej. 0.04 = 4 %). Puede ser 0.
+
+    Returns:
+        Aporte mensual requerido. Retorna ``0.0`` si el saldo actual ya
+        cubre la meta o si supera el valor futuro de la meta.
+
+    Raises:
+        ValueError: Si algún parámetro es inválido.
+
+    Examples:
+        >>> round(calcular_aporte_requerido(1_000_000, 10, 0.0, 0.0), 2)
+        100000.0
+        >>> calcular_aporte_requerido(500_000, 12, 600_000, 0.05)
+        0.0
+    """
+    if meta <= 0:
+        raise ValueError(f"meta debe ser mayor que cero, se recibió {meta}.")
+    if plazo_meses <= 0:
+        raise ValueError(
+            f"plazo_meses debe ser mayor que cero, se recibió {plazo_meses}."
+        )
+    if saldo_actual < 0:
+        raise ValueError(
+            f"saldo_actual no puede ser negativo, se recibió {saldo_actual}."
+        )
+    if tasa_anual < 0:
+        raise ValueError(
+            f"tasa_anual no puede ser negativa, se recibió {tasa_anual}."
+        )
+
+    # Tasa efectiva mensual: (1 + tasa_anual)^(1/12) - 1
+    r = (1 + tasa_anual) ** (1 / 12) - 1
+    n = plazo_meses
+
+    if r == 0:
+        aporte = (meta - saldo_actual) / n
+    else:
+        factor = (1 + r) ** n
+        fv_saldo = saldo_actual * factor
+        if fv_saldo >= meta:
+            return 0.0
+        aporte = (meta - fv_saldo) * r / (factor - 1)
+
+    return max(0.0, aporte)
+
+
+def gen_objetivo_ahorro(
+    meta: float,
+    plazo_meses: int,
+    saldo_actual: float,
+    tasa_anual: float,
+    fecha_inicio: date | str,
+    moneda: str = "CLP",
+    id_posicion: str = "",
+) -> pd.DataFrame:
+    """Genera la tabla de desarrollo mensual de un objetivo de ahorro.
+
+    Proyecta el crecimiento del saldo mes a mes, sumando el aporte mensual
+    requerido (calculado con :func:`calcular_aporte_requerido`) y aplicando
+    la rentabilidad compuesta mensual.  La tabla tiene exactamente
+    ``plazo_meses`` filas.
+
+    Convención de signos (activo del usuario):
+        - ``Flujo_Periodo`` negativo (el aporte es un egreso mensual).
+        - ``Rendimiento_Costo`` positivo (crecimiento del saldo).
+        - ``Saldo_Final`` crece con el tiempo, aproximándose a ``meta``.
+
+    Args:
+        meta: Monto objetivo a alcanzar. Debe ser > 0.
+        plazo_meses: Horizonte en meses. Debe ser > 0.
+        saldo_actual: Saldo ya acumulado al inicio. Debe ser >= 0.
+        tasa_anual: Rentabilidad anual esperada como decimal (p. ej. 0.04).
+            Puede ser 0.
+        fecha_inicio: Mes del primer período proyectado.
+        moneda: Código de moneda (``"CLP"``, ``"UF"``, ``"USD"``).
+        id_posicion: ID de la posición para la columna ``ID_Posicion``.
+
+    Returns:
+        :class:`pandas.DataFrame` con columnas estándar de tabla de desarrollo.
+        Contiene exactamente ``plazo_meses`` filas.
+
+    Raises:
+        ValueError: Si algún parámetro es inválido.
+
+    Examples:
+        >>> from datetime import date
+        >>> df = gen_objetivo_ahorro(
+        ...     meta=1_200_000,
+        ...     plazo_meses=12,
+        ...     saldo_actual=0,
+        ...     tasa_anual=0.0,
+        ...     fecha_inicio=date(2026, 4, 1),
+        ... )
+        >>> len(df)
+        12
+        >>> abs(df["Saldo_Final"].iloc[-1] - 1_200_000) < 1.0
+        True
+    """
+    if meta <= 0:
+        raise ValueError(f"meta debe ser mayor que cero, se recibió {meta}.")
+    if plazo_meses <= 0:
+        raise ValueError(
+            f"plazo_meses debe ser mayor que cero, se recibió {plazo_meses}."
+        )
+    if saldo_actual < 0:
+        raise ValueError(
+            f"saldo_actual no puede ser negativo, se recibió {saldo_actual}."
+        )
+    if tasa_anual < 0:
+        raise ValueError(
+            f"tasa_anual no puede ser negativa, se recibió {tasa_anual}."
+        )
+
+    aporte = calcular_aporte_requerido(meta, plazo_meses, saldo_actual, tasa_anual)
+    # Tasa efectiva mensual: (1 + tasa_anual)^(1/12) - 1
+    tasa_mensual: float = (1 + tasa_anual) ** (1 / 12) - 1
+    fecha: date = _parse_fecha(fecha_inicio)
+    saldo: float = float(saldo_actual)
+    nota = (
+        f"Meta {moneda} {meta:,.0f} | "
+        f"Aporte {moneda} {aporte:,.0f}/mes | "
+        f"Tasa {tasa_anual * 100:.1f}% anual"
+    )
+    rows: list[dict] = []
+
+    for _ in range(plazo_meses):
+        saldo_ini = saldo
+        rendimiento = round(saldo_ini * tasa_mensual, 2)
+        saldo = round(saldo_ini + rendimiento + aporte, 2)
+
+        rows.append(
+            {
+                "ID_Posicion": id_posicion,
+                "Periodo": fecha.strftime("%Y-%m"),
+                "Saldo_Inicial": saldo_ini,
+                "Flujo_Periodo": round(-aporte, 2),    # egreso del usuario
+                "Rendimiento_Costo": rendimiento,       # positivo: crecimiento
                 "Amortizacion": 0.0,
                 "Saldo_Final": saldo,
                 "Moneda": moneda,
