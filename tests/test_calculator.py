@@ -11,6 +11,7 @@ from core.calculator import (
     calcular_pension_mensual,
     capa_desbloqueada,
     carga_financiera,
+    cobertura_deuda,
     espacio_disponible_bucket,
     gap_fondo,
     margen_libre,
@@ -21,6 +22,7 @@ from core.calculator import (
     posicion_vida_v1,
     posicion_vida_v2,
     posicion_vida_v3,
+    tasa_ahorro_real,
 )
 
 # ---------------------------------------------------------------------------
@@ -789,3 +791,41 @@ class TestCalcularPensionMensual:
         p1 = calcular_pension_mensual(1_000_000, 20, 0.04)
         p2 = calcular_pension_mensual(2_000_000, 20, 0.04)
         assert p2 == pytest.approx(2 * p1, rel=1e-6)
+
+
+class TestCoberturaDeuda:
+    def test_cobertura_normal(self):
+        assert cobertura_deuda(2_000_000, 10_000_000) == pytest.approx(0.2)
+
+    def test_cobertura_cero_activo(self):
+        assert cobertura_deuda(0, 10_000_000) == pytest.approx(0.0)
+
+    def test_cobertura_mayor_que_uno(self):
+        assert cobertura_deuda(15_000_000, 10_000_000) == pytest.approx(1.5)
+
+    def test_deuda_cero_lanza_error(self):
+        with pytest.raises(ValueError):
+            cobertura_deuda(1_000_000, 0)
+
+    def test_deuda_negativa_lanza_error(self):
+        with pytest.raises(ValueError):
+            cobertura_deuda(1_000_000, -1)
+
+
+class TestTasaAhorroReal:
+    def test_tasa_normal(self):
+        assert tasa_ahorro_real(1_500_000, 10_000_000) == pytest.approx(0.15)
+
+    def test_tasa_cero_aportes(self):
+        assert tasa_ahorro_real(0, 10_000_000) == pytest.approx(0.0)
+
+    def test_ingreso_cero_lanza_error(self):
+        with pytest.raises(ValueError):
+            tasa_ahorro_real(1_000_000, 0)
+
+    def test_ingreso_negativo_lanza_error(self):
+        with pytest.raises(ValueError):
+            tasa_ahorro_real(1_000_000, -1)
+
+    def test_tasa_alta(self):
+        assert tasa_ahorro_real(3_000_000, 10_000_000) == pytest.approx(0.3)

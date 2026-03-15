@@ -493,3 +493,66 @@ def calcular_pension_mensual(
     else:
         pension = total_acumulado / n
     return pension
+
+
+def cobertura_deuda(
+    activo_liquido: float,
+    deuda_total: float,
+) -> float:
+    """Ratio de cobertura de deuda con liquidez disponible.
+
+    Mide qué fracción de la deuda total podría cubrirse con el activo
+    líquido disponible hoy.
+
+    Args:
+        activo_liquido: Valor total de activos líquidos disponibles (CLP).
+        deuda_total: Suma de saldos de todos los pasivos (CLP). Debe ser > 0.
+
+    Returns:
+        ``activo_liquido / deuda_total``.
+        0.20 significa que se cubre el 20 % de la deuda con liquidez.
+
+    Raises:
+        ValueError: Si ``deuda_total`` es cero o negativo.
+
+    Examples:
+        >>> cobertura_deuda(2_000_000, 10_000_000)
+        0.2
+    """
+    if deuda_total <= 0:
+        raise ValueError(
+            f"deuda_total debe ser mayor que cero, se recibió {deuda_total}."
+        )
+    return activo_liquido / deuda_total
+
+
+def tasa_ahorro_real(
+    aportes_inversion_mensual: float,
+    ingreso: float,
+) -> float:
+    """Fracción del ingreso destinada a inversión / ahorro previsional.
+
+    Incluye AFP, APV e inversiones adicionales — todo lo que construye
+    patrimonio a largo plazo.
+
+    Args:
+        aportes_inversion_mensual: Suma mensual de aportes a AFP + APV +
+            inversiones adicionales (CLP).
+        ingreso: Ingreso mensual total. Debe ser > 0.
+
+    Returns:
+        ``aportes_inversion_mensual / ingreso``.
+        0.15 significa que el 15 % del ingreso se ahorra / invierte.
+
+    Raises:
+        ValueError: Si ``ingreso`` es cero o negativo.
+
+    Examples:
+        >>> tasa_ahorro_real(1_500_000, 10_000_000)
+        0.15
+    """
+    if ingreso <= 0:
+        raise ValueError(
+            f"ingreso debe ser mayor que cero, se recibió {ingreso}."
+        )
+    return aportes_inversion_mensual / ingreso
