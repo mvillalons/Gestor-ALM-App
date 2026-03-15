@@ -234,10 +234,9 @@ def _generar_tabla(tipo: str, params: dict, id_pos: str) -> "pd.DataFrame | None
 def _registrar_pasivo(id_pos: str, params: dict, tabla) -> None:
     """Guarda parámetros y tabla en session_state; actualiza pasivos_con_tabla."""
     state.set_position(id_pos, params)
-    st.session_state.setdefault("schedules", {})[id_pos] = tabla
-    pac: list = st.session_state.setdefault("pasivos_con_tabla", [])
-    if id_pos not in pac:
-        pac.append(id_pos)
+    st.session_state["schedules"][id_pos] = tabla
+    if id_pos not in st.session_state["pasivos_con_tabla"]:
+        st.session_state["pasivos_con_tabla"].append(id_pos)
     state.update_layer()
 
 
@@ -962,7 +961,7 @@ with col_right:
                         id_posicion="AFP_PRINCIPAL",
                     )
                     state.set_position("AFP_PRINCIPAL", params_afp)
-                    st.session_state.setdefault("schedules", {})["AFP_PRINCIPAL"] = tabla_afp_nueva
+                    st.session_state["schedules"]["AFP_PRINCIPAL"] = tabla_afp_nueva
                     st.session_state["afp_saldo"] = float(afp_saldo_in)
                     state.update_layer()
                     st.session_state["c2_show_afp_form"] = False
@@ -1086,27 +1085,28 @@ with col_right:
                     st.error("La institución no puede estar vacía.")
                     st.stop()
 
-                # Horizonte: buscar en TODAS las posiciones AFP_*, luego plan_params, luego defaults
-                _afp_ids_hz = state.list_positions(clase="Prevision_AFP")
-                _edad_act_hz: float = 40.0
-                _edad_jub_hz: float = 65.0
-                _hz_from_afp = False
-                for _afp_pid in _afp_ids_hz:
-                    _afp_p_hz = _pos(_afp_pid)
-                    if "Edad_Actual" in _afp_p_hz:
-                        _edad_act_hz = float(_afp_p_hz["Edad_Actual"])
-                        _edad_jub_hz = float(_afp_p_hz.get("Edad_Jubilacion", 65))
-                        _hz_from_afp = True
-                        break
-                if not _hz_from_afp:
-                    _pp_hz = st.session_state.get("plan_params", {})
-                    if "edad_jubilacion" in _pp_hz:
-                        _edad_jub_hz = float(_pp_hz["edad_jubilacion"])
-                _horizonte_apv = max(1, round((_edad_jub_hz - _edad_act_hz) * 12))
-                if not _hz_from_afp:
+                # Horizonte: AFP registrada → plan_params → default conservador (40→65)
+                afp_ids = state.list_positions(clase="Prevision_AFP")
+                if afp_ids:
+                    afp_pos = state.get_position(afp_ids[0]) or {}
+                    edad_actual = int(afp_pos.get("Edad_Actual", 40))
+                    edad_jubilacion = int(afp_pos.get("Edad_Jubilacion", 65))
+                else:
+                    edad_jubilacion = int(
+                        st.session_state.get("plan_params", {})
+                        .get("edad_jubilacion", 65)
+                    )
+                    edad_actual = 40
+                horizonte_meses = max((edad_jubilacion - edad_actual) * 12, 1)
+                if horizonte_meses <= 12:
+                    st.warning(
+                        f"⚠️ Horizonte APV muy corto ({horizonte_meses} meses). "
+                        "Verifica que tu AFP tenga Edad_Actual y Edad_Jubilacion registradas."
+                    )
+                elif not afp_ids:
                     st.info(
-                        f"ℹ️ Sin AFP registrada — horizonte estimado a {_horizonte_apv} meses "
-                        f"(edad {int(_edad_act_hz)} → {int(_edad_jub_hz)} años). "
+                        f"ℹ️ Sin AFP registrada — horizonte estimado a {horizonte_meses} meses "
+                        f"(edad {edad_actual} → {edad_jubilacion} años). "
                         "Registra tu AFP en la sección de previsión para un cálculo exacto."
                     )
 
@@ -1128,20 +1128,24 @@ with col_right:
                     "Tasa_Anual_Pct": apv_tasa_in,
                     "Regimen_Tributario": apv_regimen,
                     "Fecha_Inicio": date.today().isoformat(),
-                    "Horizonte_Meses": _horizonte_apv,
+                    "Horizonte_Meses": horizonte_meses,
                 }
                 try:
+                    print(
+                        f"DEBUG APV: horizonte_meses={horizonte_meses}, "
+                        f"edad_actual={edad_actual}, edad_jubilacion={edad_jubilacion}"
+                    )
                     tabla_apv_nueva = schedule.gen_fondo_inversion(
                         saldo=float(apv_saldo_in),
                         aporte_mensual=float(apv_aporte_in),
                         tasa_anual=apv_tasa_in / 100,
-                        horizonte_meses=_horizonte_apv,
+                        horizonte_meses=horizonte_meses,
                         fecha_inicio=date.today(),
                         moneda="CLP",
                         id_posicion=apv_id_final,
                     )
                     state.set_position(apv_id_final, params_apv)
-                    st.session_state.setdefault("schedules", {})[apv_id_final] = tabla_apv_nueva
+                    st.session_state["schedules"][apv_id_final] = tabla_apv_nueva
                     state.mark_dirty()
                     state.update_layer()
                     st.session_state["c2_show_apv_form"] = False

@@ -435,3 +435,61 @@ def espacio_disponible_bucket(session_state: dict, bucket_id: str) -> float:
         if p.get("bucket_vinculado") == bucket_id
     )
     return monto_bucket - cuotas_vinculadas
+
+
+# ---------------------------------------------------------------------------
+# Capa 3 — Pensión mensual sostenible
+# ---------------------------------------------------------------------------
+
+
+def calcular_pension_mensual(
+    total_acumulado: float,
+    anos_retiro: int,
+    tasa_retiro_anual: float = 0.04,
+) -> float:
+    """Calcula la pensión mensual sostenible usando la fórmula de anualidad.
+
+    Retiro mensual que agota exactamente ``total_acumulado`` en ``anos_retiro``
+    años, asumiendo que el fondo sigue rentando ``tasa_retiro_anual`` anual.
+
+    Fórmula de pago de anualidad (PMT):
+        tasa_mensual = (1 + tasa_retiro_anual) ** (1/12) - 1
+        n = anos_retiro * 12
+        PMT = total * tasa_mensual / (1 - (1 + tasa_mensual) ** (-n))
+
+    Si la tasa es cero, se divide linealmente: total / n.
+
+    Args:
+        total_acumulado: Capital total acumulado al momento del retiro (CLP).
+        anos_retiro: Años de retiro esperados. Debe ser > 0.
+        tasa_retiro_anual: Tasa anual de rendimiento durante el retiro
+            (default 0.04 = 4%, regla del 4 %).
+
+    Returns:
+        Pensión mensual sostenible en las mismas unidades que
+        ``total_acumulado``.
+
+    Raises:
+        ValueError: Si ``anos_retiro`` <= 0.
+
+    Examples:
+        >>> calcular_pension_mensual(0, 20) == 0.0
+        True
+        >>> calcular_pension_mensual(1_000_000, 20, 0.04) > 6_000
+        True
+    """
+    if anos_retiro <= 0:
+        raise ValueError(
+            f"anos_retiro debe ser mayor que 0, se recibió {anos_retiro}."
+        )
+    if total_acumulado <= 0:
+        return 0.0
+    n = anos_retiro * 12
+    tasa_mensual = (1 + tasa_retiro_anual) ** (1 / 12) - 1
+    if tasa_mensual > 0:
+        pension = total_acumulado * tasa_mensual / (
+            1 - (1 + tasa_mensual) ** (-n)
+        )
+    else:
+        pension = total_acumulado / n
+    return pension

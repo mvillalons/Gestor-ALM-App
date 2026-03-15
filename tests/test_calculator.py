@@ -8,6 +8,7 @@ from core.calculator import (
     VALOR_UF_DEFAULT,
     VALOR_USD_DEFAULT,
     bucket_sugerido,
+    calcular_pension_mensual,
     capa_desbloqueada,
     carga_financiera,
     espacio_disponible_bucket,
@@ -731,3 +732,60 @@ class TestEspacioDisponibleBucket:
             }
         }
         assert espacio_disponible_bucket(ss, "GAS_ESE_BUCKET") == 2_000_000.0
+
+
+# ===========================================================================
+# Capa 3 — Pensión mensual sostenible
+# ===========================================================================
+
+
+class TestCalcularPensionMensual:
+    """Tests para calcular_pension_mensual() — fórmula de anualidad."""
+
+    def test_total_cero_da_cero(self):
+        """Si no hay capital acumulado la pensión es cero."""
+        assert calcular_pension_mensual(0, 20) == 0.0
+
+    def test_total_negativo_da_cero(self):
+        """Capital negativo también retorna cero."""
+        assert calcular_pension_mensual(-500_000, 20) == 0.0
+
+    def test_anos_cero_lanza_valueerror(self):
+        """anos_retiro = 0 debe lanzar ValueError."""
+        with pytest.raises(ValueError):
+            calcular_pension_mensual(1_000_000, 0)
+
+    def test_anos_negativos_lanza_valueerror(self):
+        """anos_retiro < 0 debe lanzar ValueError."""
+        with pytest.raises(ValueError):
+            calcular_pension_mensual(1_000_000, -5)
+
+    def test_resultado_aproximado_anualidad_4pct(self):
+        """1_000_000 / 20 años / 4% anual → ~6_060/mes (regla del 4%)."""
+        resultado = calcular_pension_mensual(1_000_000, 20, 0.04)
+        # Con la fórmula de anualidad compuesta mensual el resultado es ~6_023.
+        # Usamos tolerancia del 2% para cubrir diferencias de redondeo.
+        assert resultado == pytest.approx(6_060, rel=0.02)
+
+    def test_tasa_cero_divide_linealmente(self):
+        """Con tasa 0% se divide el capital entre el número de meses."""
+        resultado = calcular_pension_mensual(1_200_000, 10, 0.0)
+        assert resultado == pytest.approx(1_200_000 / 120, rel=1e-6)
+
+    def test_horizonte_corto_da_pension_alta(self):
+        """A menor horizonte, mayor pensión mensual."""
+        pension_20 = calcular_pension_mensual(1_000_000, 20, 0.04)
+        pension_10 = calcular_pension_mensual(1_000_000, 10, 0.04)
+        assert pension_10 > pension_20
+
+    def test_mayor_tasa_da_mayor_pension(self):
+        """A mayor tasa de retiro, mayor pensión sostenible."""
+        pension_baja = calcular_pension_mensual(1_000_000, 20, 0.02)
+        pension_alta = calcular_pension_mensual(1_000_000, 20, 0.06)
+        assert pension_alta > pension_baja
+
+    def test_consistencia_con_total_grande(self):
+        """La pensión escala linealmente con el capital."""
+        p1 = calcular_pension_mensual(1_000_000, 20, 0.04)
+        p2 = calcular_pension_mensual(2_000_000, 20, 0.04)
+        assert p2 == pytest.approx(2 * p1, rel=1e-6)

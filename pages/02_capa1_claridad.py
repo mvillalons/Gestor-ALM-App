@@ -18,6 +18,8 @@ Persistencia:
 
 from __future__ import annotations
 
+from datetime import date
+
 import streamlit as st
 
 from core import calculator, drive, state
@@ -143,16 +145,24 @@ def _render_bucket_desglose(bucket_id: str, monto: float) -> None:
         st.markdown(f"**{label}:** {_fmt(monto)}", unsafe_allow_html=True)
         return
 
-    lines = [f"**{label}: {_fmt(monto)}**"]
+    # Cabecera: etiqueta + monto total (misma línea independiente)
+    st.markdown(f"**{label}:** {_fmt(monto)}", unsafe_allow_html=True)
+    # Detalle: una llamada st.markdown() por ítem vinculado
     total_vinculado = 0.0
     for pid, p in vinculadas:
         cuota = float(p.get("Cuota_Vinculada_CLP", 0))
         desc = p.get("Descripcion", pid)
-        lines.append(f"&nbsp;&nbsp;└ {desc} *(calculado)*: $ {int(cuota):,}")
+        st.markdown(
+            f"&nbsp;&nbsp;&nbsp;└ {desc} *(calculado)*: ${int(cuota):,}",
+            unsafe_allow_html=True,
+        )
         total_vinculado += cuota
+    # Resto: línea separada
     resto = monto - total_vinculado
-    lines.append(f"&nbsp;&nbsp;└ Resto estimado: {_fmt(max(0.0, resto))}")
-    st.markdown("  \n".join(lines), unsafe_allow_html=True)
+    st.markdown(
+        f"&nbsp;&nbsp;&nbsp;└ Resto estimado: {_fmt(max(0.0, resto))}",
+        unsafe_allow_html=True,
+    )
 
 
 @st.cache_resource
@@ -303,7 +313,37 @@ with col_right:
 # MÉTRICAS — calculadas con valores live, renderizadas en el placeholder
 # ────────────────────────────────────────────────────────────────────────────
 
-_margen = calculator.margen_libre(live_ing, live_ese, live_imp, live_asp)
+_margen_bruto = calculator.margen_libre(live_ing, live_ese, live_imp, live_asp)
+
+# Descontar cuotas de pasivos de Capa 2 que NO están vinculados a ningún bucket
+# (los vinculados ya están incluidos en el monto del bucket, no contar dos veces)
+_valor_uf = float(
+    st.session_state.get("valor_uf", calculator.VALOR_UF_DEFAULT)
+)
+_valor_usd = float(
+    st.session_state.get("valor_usd", calculator.VALOR_USD_DEFAULT)
+)
+_schedules = st.session_state.get("schedules", {})
+_hoy_str = date.today().strftime("%Y-%m")
+_cuotas_pasivos: list[float] = []
+for _pid_c1 in state.list_positions():
+    _p_c1 = state.get_position(_pid_c1) or {}
+    if _p_c1.get("Clase", "") not in ("Pasivo_Estructural", "Pasivo_Corto_Plazo"):
+        continue
+    if _p_c1.get("bucket_vinculado"):
+        continue  # ya incluido en el monto del bucket, no descontar dos veces
+    _tabla_c1 = _schedules.get(_pid_c1)
+    if _tabla_c1 is not None and len(_tabla_c1) > 0:
+        _futuras_c1 = _tabla_c1[_tabla_c1["Periodo"] >= _hoy_str]
+        if len(_futuras_c1) > 0:
+            _cuota_raw = abs(float(_futuras_c1.iloc[0]["Flujo_Periodo"]))
+            _moneda_c1 = _p_c1.get("Moneda", "CLP")
+            _cuota_clp = calculator.normalizar_a_clp(
+                _cuota_raw, _moneda_c1, _valor_uf, _valor_usd
+            )
+            _cuotas_pasivos.append(_cuota_clp)
+_n_pasivos_c2 = len(_cuotas_pasivos)
+_margen = _margen_bruto - sum(_cuotas_pasivos)
 
 with _metrics_ph.container():
 
@@ -376,6 +416,13 @@ with _metrics_ph.container():
             f"Esenciales {_fmt(live_ese)}  ·  "
             f"Importantes {_fmt(live_imp)}  ·  "
             f"Aspiraciones {_fmt(live_asp)}"
+        )
+
+    # Mostrar nota si hay pasivos de Capa 2 que se están descontando
+    if _n_pasivos_c2 > 0:
+        _pasivo_label = "pasivo" if _n_pasivos_c2 == 1 else "pasivos"
+        st.markdown(
+            f"*Incluye cuotas de {_n_pasivos_c2} {_pasivo_label} no vinculados a buckets*"
         )
 
 # ── Sugerencias pendientes ────────────────────────────────────────────────────

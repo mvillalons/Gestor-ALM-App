@@ -69,31 +69,32 @@ if not st.session_state.get("drive_loaded", False):
                 _objetivos_activos: list[str] = []
 
                 for _pid, _pparams in _positions.items():
-                    if _pid.startswith("PAS_"):
-                        _tabla = drive.load_schedule(_svc, _folders, _pid)
-                        if _tabla is not None and not _tabla.empty:
-                            _schedules[_pid] = _tabla
-                            _pasivos_con_tabla.append(_pid)
+                    _clase = _pparams.get("Clase", "")
 
-                    elif _pid.startswith("AFP_"):
-                        _tabla = drive.load_schedule(_svc, _folders, _pid)
-                        if _tabla is not None and not _tabla.empty:
-                            _schedules[_pid] = _tabla
+                    # Cargar tabla para toda posición; retorna None si no hay archivo
+                    _tabla = drive.load_schedule(_svc, _folders, _pid)
+                    if _tabla is not None and not _tabla.empty:
+                        _schedules[_pid] = _tabla
+
+                    # Actualizar listas de tracking según Clase (no por prefijo de ID)
+                    if _clase in ("Pasivo_Estructural", "Pasivo_Corto_Plazo"):
+                        if _pid in _schedules and _pid not in _pasivos_con_tabla:
+                            _pasivos_con_tabla.append(_pid)
+                    elif _clase == "Activo_Financiero":
+                        # Incluye APV y cualquier activo financiero con tabla
+                        if _pid in _schedules and _pid not in _activos_con_tabla:
+                            _activos_con_tabla.append(_pid)
+                    elif _clase == "Prevision_AFP":
                         # Restaurar afp_saldo para el cálculo de capas
                         _saldo_afp = _pparams.get("Saldo_Actual")
                         if _saldo_afp is not None:
                             st.session_state["afp_saldo"] = float(_saldo_afp)
+                    elif _clase == "Objetivo_Ahorro":
+                        if _pid not in _objetivos_activos:
+                            _objetivos_activos.append(_pid)
 
-                    elif _pid.startswith("ACT_"):
-                        # Activos financieros con tabla de desarrollo (Capa 4 unlock)
-                        _tabla = drive.load_schedule(_svc, _folders, _pid)
-                        if _tabla is not None and not _tabla.empty:
-                            _schedules[_pid] = _tabla
-                            _activos_con_tabla.append(_pid)
-
-                    elif _pid.startswith("OBJ_"):
-                        # Objetivos de ahorro activos (Capa 4 unlock)
-                        _objetivos_activos.append(_pid)
+                print(f"DEBUG bootstrap: positions={list(_positions.keys())}")
+                print(f"DEBUG bootstrap: schedules={list(_schedules.keys())}")
 
                 if _schedules:
                     st.session_state["schedules"] = _schedules

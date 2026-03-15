@@ -245,6 +245,77 @@ al valor real y se marca `dirty = True`.
 
 ---
 
+## Agente Planificador — Marco de Lineamientos
+
+### Filosofía
+
+- El agente NO pregunta — propone un plan completo basado en los datos del usuario.
+- El usuario lee, entiende, y edita solo si quiere cambiar algo.
+- Al editar una meta, el agente recalcula el plan completo.
+- Las propuestas son determinísticas (motor de reglas Python) en v1 — en v2 se conecta
+  Claude API para lenguaje natural.
+
+### Clasificación de deudas
+
+**DEUDAS A LIQUIDAR (Paso 1):**
+Todas excepto hipotecarios — tarjetas, créditos consumo, leasing, cualquier pasivo sin
+garantía real inmobiliaria.
+Orden: mayor tasa primero (método avalanche).
+
+**DEUDAS ACEPTABLES:**
+Hipotecarios en UF únicamente.
+
+### Pasos del plan (en orden estricto)
+
+**PASO 1 — Liquidar todas las deudas no hipotecarias**
+- Listar deudas ordenadas por tasa descendente.
+- Calcular meses para liquidar cada una con margen libre.
+- Mostrar fecha estimada de libertad financiera (sin deudas malas).
+
+**PASO 2 — Fondo de reserva 6 meses** *(en paralelo con Paso 1 parcialmente)*
+- Meta: `bucket_esencial × 6`
+- Fuente: margen libre disponible tras Paso 1.
+- Mínimo paralelo: si el fondo < 3 meses, destinar 20% del margen libre al fondo aunque
+  haya deudas activas.
+
+**PASO 3 — Pensión asegurada** *(siempre activo desde el inicio)*
+- Meta de acumulación:
+  `ingreso_actual × 0.70 × 12 × (85 - edad_jubilacion)`
+  *(tasa de reemplazo 70%, editable por usuario)*
+- Brecha = `meta - proyección_actual` (AFP + APV + otros).
+- Si hay brecha: sugerir aumento de APV con el monto necesario.
+- Este paso nunca se pausa — siempre se mantiene aporte mínimo.
+
+**PASO 4 — Acumulación y estilo de vida**
+Se activa cuando: Paso 1 completo Y Paso 2 completo.
+Distribución sugerida del margen libre mensual:
+- 50% inversión largo plazo (fondos, ETFs)
+- 30% fondo de estilo de vida (retiro cada 2-3 años)
+- 20% libre / colchón
+
+### Métricas clave del agente
+
+| Métrica | Definición | Default |
+|---|---|---|
+| `fecha_libertad_financiera` | Mes en que termina el último pasivo no hipotecario | calculado |
+| `brecha_pension` | `meta_acumulacion - proyeccion_actual` | calculado |
+| `tasa_reemplazo` | Fracción del ingreso actual como pensión objetivo | 0.70 |
+| `anos_retiro` | `85 - edad_jubilacion` | calculado |
+| `meses_reserva_meta` | Meses de esenciales que debe cubrir el fondo | 6 |
+
+Todos los parámetros con default son editables por el usuario.
+Rango `tasa_reemplazo`: 0.50 – 1.00. Rango `meses_reserva_meta`: 3 – 12.
+
+### Interfaz del plan
+
+- Una card por paso con: estado (`pendiente` / `en curso` / `completo`), diagnóstico
+  en 2 líneas, acción sugerida, botón **[Editar]**.
+- Al editar: el usuario cambia parámetros y el agente recalcula todo el plan
+  automáticamente.
+- Sin preguntas — solo propuestas editables.
+
+---
+
 ## Gestión de estado y guardado
 
 ```python

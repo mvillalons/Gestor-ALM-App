@@ -829,10 +829,9 @@ with st.expander("⚙️ Gestionar activos y objetivos", expanded=_zona3_expande
                     id_posicion=_id_final_act,
                 )
                 state.set_position(_id_final_act, _params_act)
-                st.session_state.setdefault("schedules", {})[_id_final_act] = _tabla_act
-                _act_list: list = st.session_state.setdefault("activos_con_tabla", [])
-                if _id_final_act not in _act_list:
-                    _act_list.append(_id_final_act)
+                st.session_state["schedules"][_id_final_act] = _tabla_act
+                if _id_final_act not in st.session_state["activos_con_tabla"]:
+                    st.session_state["activos_con_tabla"].append(_id_final_act)
                 state.update_layer()
                 state.mark_dirty()
                 st.session_state["c3_show_activo_form"] = False
@@ -1002,10 +1001,9 @@ with st.expander("⚙️ Gestionar activos y objetivos", expanded=_zona3_expande
                     id_posicion=_id_final_inv,
                 )
                 state.set_position(_id_final_inv, _params_inv)
-                st.session_state.setdefault("schedules", {})[_id_final_inv] = _tabla_inv
-                _act_list_inv: list = st.session_state.setdefault("activos_con_tabla", [])
-                if _id_final_inv not in _act_list_inv:
-                    _act_list_inv.append(_id_final_inv)
+                st.session_state["schedules"][_id_final_inv] = _tabla_inv
+                if _id_final_inv not in st.session_state["activos_con_tabla"]:
+                    st.session_state["activos_con_tabla"].append(_id_final_inv)
                 state.update_layer()
                 state.mark_dirty()
                 st.session_state["c3_show_inv_form"] = False
@@ -1212,10 +1210,9 @@ with st.expander("⚙️ Gestionar activos y objetivos", expanded=_zona3_expande
                     "Fecha_Inicio": date.today().isoformat(),
                 }
                 state.set_position(_id_final_obj, _params_obj)
-                st.session_state.setdefault("schedules", {})[_id_final_obj] = _tabla_obj
-                _obj_activos: list = st.session_state.setdefault("objetivos_activos", [])
-                if _id_final_obj not in _obj_activos:
-                    _obj_activos.append(_id_final_obj)
+                st.session_state["schedules"][_id_final_obj] = _tabla_obj
+                if _id_final_obj not in st.session_state["objetivos_activos"]:
+                    st.session_state["objetivos_activos"].append(_id_final_obj)
                 state.update_layer()
                 state.mark_dirty()
                 st.session_state["c3_show_obj_form"] = False

@@ -359,12 +359,12 @@ def _generar_paso1(ctx: dict) -> dict:
             "estado": ESTADO_EN_CURSO,
             "diagnostico": (
                 f"Tienes {len(deudas)} deuda{'s' if len(deudas) > 1 else ''} "
-                f"por $ {int(total_deuda):,} en total.\n"
+                f"por ${int(total_deuda):,} en total.\n"
                 f"⚠️ Margen libre insuficiente — revisa tus gastos."
             ),
             "accion": (
                 f"Libera capacidad de ahorro recortando gastos. "
-                f"Tienes $ {int(total_deuda):,} en deudas pendientes."
+                f"Tienes ${int(total_deuda):,} en deudas pendientes."
             ),
             "monto_mensual": 0.0,
             "plazo_meses": 999,
@@ -381,11 +381,11 @@ def _generar_paso1(ctx: dict) -> dict:
         "estado": ESTADO_EN_CURSO,
         "diagnostico": (
             f"Tienes {len(deudas)} deuda{'s' if len(deudas) > 1 else ''} "
-            f"por $ {int(total_deuda):,} en total.\n"
-            f"Con $ {int(margen_para_deudas):,}/mes las liquidas en ~{plazo} meses."
+            f"por ${int(total_deuda):,} en total.\n"
+            f"Con ${int(margen_para_deudas):,}/mes las liquidas en ~{plazo} meses."
         ),
         "accion": (
-            f"Destina $ {int(margen_para_deudas):,}/mes comenzando por "
+            f"Destina ${int(margen_para_deudas):,}/mes comenzando por "
             f"{primera['descripcion']} "
             f"({primera['tasa_anual'] * 100:.1f}% anual)."
         ),
@@ -431,7 +431,7 @@ def _generar_paso2(ctx: dict, paso1: dict) -> dict:
             "diagnostico": (
                 f"Tienes {fondo_actual_meses:.1f} meses de reserva. "
                 f"¡Meta de {meses_reserva_meta} meses cubierta!\n"
-                f"Fondo: $ {int(liq_clp):,} / Meta: $ {int(meta_fondo):,}."
+                f"Fondo: ${int(liq_clp):,} / Meta: ${int(meta_fondo):,}."
             ),
             "accion": "",
             "monto_mensual": 0.0,
@@ -454,7 +454,7 @@ def _generar_paso2(ctx: dict, paso1: dict) -> dict:
             "estado": ESTADO_EN_CURSO,
             "diagnostico": (
                 f"Tienes {fondo_actual_meses:.1f} meses de reserva. "
-                f"Meta: {meses_reserva_meta} meses = $ {int(meta_fondo):,}.\n"
+                f"Meta: {meses_reserva_meta} meses = ${int(meta_fondo):,}.\n"
                 f"Margen libre insuficiente para aportar al fondo.{paralelo_note}"
             ),
             "accion": "Libera capacidad de ahorro recortando gastos para construir tu fondo.",
@@ -471,11 +471,11 @@ def _generar_paso2(ctx: dict, paso1: dict) -> dict:
         "estado": ESTADO_EN_CURSO,
         "diagnostico": (
             f"Tienes {fondo_actual_meses:.1f} meses de reserva. "
-            f"Meta: {meses_reserva_meta} meses = $ {int(meta_fondo):,}.\n"
-            f"Faltan $ {int(gap):,} para completar el fondo.{paralelo_note}"
+            f"Meta: {meses_reserva_meta} meses = ${int(meta_fondo):,}.\n"
+            f"Faltan ${int(gap):,} para completar el fondo.{paralelo_note}"
         ),
         "accion": (
-            f"Aparta $ {int(margen_para_fondo):,}/mes en tu cuenta de ahorro → "
+            f"Aparta ${int(margen_para_fondo):,}/mes en tu cuenta de ahorro → "
             f"completo en ~{plazo} meses."
         ),
         "monto_mensual": margen_para_fondo,
@@ -535,9 +535,9 @@ def _generar_paso3(ctx: dict, margen_disponible_p3: float = 0.0) -> dict:
             "titulo": "Pensión asegurada",
             "estado": ESTADO_COMPLETO,
             "diagnostico": (
-                f"Proyectas $ {int(proyeccion_pension_clp):,} "
+                f"Proyectas ${int(proyeccion_pension_clp):,} "
                 f"a los {int(edad_jubilacion)} años.\n"
-                f"Meta: $ {int(meta_acumulacion):,} "
+                f"Meta: ${int(meta_acumulacion):,} "
                 f"({int(tasa_reemplazo * 100)}% de tu ingreso por {anos_retiro} años). ✅"
             ),
             "accion": "Mantén los aportes actuales — meta pensional cubierta.",
@@ -553,14 +553,14 @@ def _generar_paso3(ctx: dict, margen_disponible_p3: float = 0.0) -> dict:
 
     if proyeccion_pension_clp > 0:
         diagnostico = (
-            f"Proyectas $ {int(proyeccion_pension_clp):,} "
+            f"Proyectas ${int(proyeccion_pension_clp):,} "
             f"a los {int(edad_jubilacion)} años.\n"
-            f"Meta: $ {int(meta_acumulacion):,} "
+            f"Meta: ${int(meta_acumulacion):,} "
             f"({int(tasa_reemplazo * 100)}% de tu ingreso por {anos_retiro} años)."
         )
     else:
         diagnostico = (
-            f"Meta pensional: $ {int(meta_acumulacion):,} "
+            f"Meta pensional: ${int(meta_acumulacion):,} "
             f"({int(tasa_reemplazo * 100)}% de tu ingreso por {anos_retiro} años).\n"
             "Registra tu AFP en Capa 2 para ver tu proyección actual."
         )
@@ -568,21 +568,21 @@ def _generar_paso3(ctx: dict, margen_disponible_p3: float = 0.0) -> dict:
     # Coordinación de margen: capped por lo disponible tras P1 y P2
     if margen_disponible_p3 <= 0:
         accion = (
-            f"Cuando liberes margen, necesitarás $ {int(aporte_ideal):,}/mes "
+            f"Cuando liberes margen, necesitarás ${int(aporte_ideal):,}/mes "
             f"para alcanzar tu meta pensional."
         )
         aporte_efectivo = 0.0
     elif aporte_ideal <= margen_disponible_p3:
         accion = (
-            f"Brecha de $ {int(brecha):,} — aumenta tu APV en "
-            f"$ {int(aporte_ideal):,}/mes."
+            f"Brecha de ${int(brecha):,} — aumenta tu APV en "
+            f"${int(aporte_ideal):,}/mes."
         )
         aporte_efectivo = aporte_ideal
     else:
         # Margen insuficiente: mostrar cuánto se puede aportar y en cuánto cierra
         anos_brecha = math.ceil(brecha / (margen_disponible_p3 * 12))
         accion = (
-            f"Con tu margen disponible de $ {int(margen_disponible_p3):,}/mes "
+            f"Con tu margen disponible de ${int(margen_disponible_p3):,}/mes "
             f"puedes aportar a tu APV — cerrarás la brecha en ~{anos_brecha} años."
         )
         aporte_efectivo = margen_disponible_p3
@@ -674,9 +674,15 @@ def _generar_paso4(
         }
 
     margen_disponible = max(0.0, margen_disponible_p4)
-    inv_clp = margen_disponible * distribucion.get("inversion", 0.50)
-    ev_clp = margen_disponible * distribucion.get("estilo_vida", 0.30)
-    libre_clp = margen_disponible * distribucion.get("libre", 0.20)
+    inv = margen_disponible * distribucion.get("inversion", 0.50)
+    est = margen_disponible * distribucion.get("estilo_vida", 0.30)
+    lib = margen_disponible * distribucion.get("libre", 0.20)
+
+    accion = (
+        f"Destina ${inv:,.0f}/mes a inversión de largo plazo "
+        f"(ETFs o fondos), ${est:,.0f}/mes a fondo de estilo "
+        f"de vida, y ${lib:,.0f}/mes como colchón libre."
+    )
 
     return {
         "numero": 4,
@@ -684,15 +690,11 @@ def _generar_paso4(
         "estado": ESTADO_EN_CURSO,
         "diagnostico": (
             f"Con deudas liquidadas y reserva completa, tienes "
-            f"$ {int(margen_disponible):,}/mes para hacer crecer tu patrimonio.\n"
-            f"Distribución: $ {int(inv_clp):,} inversión | "
-            f"$ {int(ev_clp):,} estilo de vida | $ {int(libre_clp):,} libre."
+            f"${int(margen_disponible):,}/mes para hacer crecer tu patrimonio.\n"
+            f"Distribución: ${int(inv):,} inversión | "
+            f"${int(est):,} estilo de vida | ${int(lib):,} libre."
         ),
-        "accion": (
-            f"Invierte $ {int(inv_clp):,}/mes en ETFs o fondos de largo plazo, "
-            f"reserva $ {int(ev_clp):,}/mes para estilo de vida y "
-            f"mantén $ {int(libre_clp):,}/mes como colchón."
-        ),
+        "accion": accion,
         "monto_mensual": margen_disponible,
         "plazo_meses": 0,
         "params": {"distribucion_paso4": distribucion},
