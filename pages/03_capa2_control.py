@@ -529,11 +529,21 @@ def _render_pasivo_form(tipo_forzado: str | None, tipos_disponibles: list[str],
                 value=int(editing_params.get("Anos_Restantes", 3)),
                 step=1, key=f"c2_anos_rest_{form_key}",
             ))
-            meses_defecto = list(editing_params.get("Meses_De_Pago", [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]))
+            _meses_raw = editing_params.get("Meses_De_Pago", [3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+            if isinstance(_meses_raw, str):
+                import ast
+                try:
+                    _meses_default = ast.literal_eval(_meses_raw)
+                except Exception:
+                    _meses_default = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            elif isinstance(_meses_raw, list):
+                _meses_default = _meses_raw
+            else:
+                _meses_default = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
             meses_pago = st.multiselect(
                 "Meses de pago",
                 options=list(range(1, 13)),
-                default=meses_defecto,
+                default=_meses_default,
                 format_func=lambda m: _MESES_NOMBRE[m],
                 key=f"c2_meses_pago_{form_key}",
                 help="Meses del año en que se realizan los pagos.",
@@ -592,6 +602,11 @@ def _render_pasivo_form(tipo_forzado: str | None, tipos_disponibles: list[str],
             )
 
         # Botones del form
+        submitted = st.form_submit_button(
+            "💾 Guardar compromiso",
+            use_container_width=True,
+            type="primary",
+        )
         col_ok, col_cancel = st.columns(2)
         with col_ok:
             confirmed = st.form_submit_button(
@@ -601,6 +616,7 @@ def _render_pasivo_form(tipo_forzado: str | None, tipos_disponibles: list[str],
             cancelled = st.form_submit_button(
                 "✕ Cancelar", use_container_width=True
             )
+        confirmed = confirmed or submitted
 
         # ── Cancelar ────────────────────────────────────────────────────
         if cancelled:
