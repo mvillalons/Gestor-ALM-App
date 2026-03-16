@@ -73,6 +73,10 @@ def _make_defaults() -> dict[str, Any]:
                 "libre": 0.20,
             },
         },
+        # Parser de cartolas — Capa 3-B
+        "parser_movimientos_pendientes": [],   # list[dict] — propuestas pendientes de revisión
+        "parser_ultimo_archivo": None,         # str | None — nombre del último archivo procesado
+        "movimientos_otros": [],               # list[dict] — movimientos sin clasificar o descartados
     }
 
 # Labels del indicador de estado

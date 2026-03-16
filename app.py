@@ -197,6 +197,16 @@ else:
             )
         )
 
+    # Herramientas siempre visibles (independiente de la capa desbloqueada)
+    if os.path.exists("pages/05_parser.py"):
+        _pages.append(
+            st.Page(
+                "pages/05_parser.py",
+                title="Importar cartola",
+                icon="📥",
+            )
+        )
+
 # ── 7. Navegación ──────────────────────────────────────────────────────────────
 pg = st.navigation(_pages, position="sidebar")
 
