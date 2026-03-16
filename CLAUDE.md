@@ -53,6 +53,7 @@ hace render. Esto permite migrar a FastAPI + Next.js en el futuro sin tocar el m
 │   ├── state.py                     ← estado de sesión + lógica de "cambios sin guardar"
 │   ├── calculator.py                ← cálculos: fondo reserva, posición de vida, margen libre
 │   ├── schedule.py                  ← generación de tablas de desarrollo mensual
+│   ├── planner.py                   ← agente planificador 4 pasos (reglas Python, sin LLM en v1)
 │   └── alm.py                       ← lógica ALM: calce de monedas, flujo neto, stress (Capa 4)
 │
 ├── parser/                          ← agente parser de cartolas PDF (Capa 3)
@@ -71,6 +72,7 @@ hace render. Esto permite migrar a FastAPI + Next.js en el futuro sin tocar el m
 └── tests/
     ├── test_calculator.py
     ├── test_schedule.py
+    ├── test_planner.py
     └── test_parser.py
 ```
 
@@ -88,24 +90,38 @@ ID_Posicion, Descripcion, Clase, Moneda, Capa_Activacion, [parámetros específi
 ```
 
 **Clases válidas:**
-- `Ingreso_Recurrente` — ingresos fijos o variables
-- `Gasto_Esencial` / `Gasto_Importante` / `Gasto_Aspiracion` — los 3 buckets
-- `Activo_Liquido` — cuentas, fondos mutuos, efectivo
-- `Activo_Financiero` — ETFs, acciones, renta fija
-- `Activo_Real` — propiedades
-- `Pasivo_Estructural` — hipotecarios
-- `Pasivo_Corto_Plazo` — créditos, colegios, tarjetas
-- `Objetivo_Ahorro` — metas con plazo y monto
-- `Prevision_AFP` — saldo y proyección previsional
+- `Ingreso_Recurrente` — ingresos fijos o variables → `ING_*`
+- `Gasto_Esencial` / `Gasto_Importante` / `Gasto_Aspiracion` — los 3 buckets → `GAS_ESE_BUCKET`, `GAS_IMP_BUCKET`, `GAS_ASP_BUCKET`
+- `Activo_Liquido` — cuenta corriente, cuenta vista, depósito a plazo, fondo mutuo líquido → `ACT_LIQUIDO_PRINCIPAL` (único principal) + `ACT_LIQ_*` (adicionales)
+- `Activo_Financiero` — inversiones financieras adicionales (FM, ETF, ACC, RF, CRIPTO) → `ACT_INV_*` + `APV_*`
+- `Activo_Real` — propiedades y vehículos → `ACT_REAL_*` (creados automáticamente con hipotecario) + `ACT_PROP_*` (sin hipotecario asociado)
+- `Pasivo_Estructural` — hipotecarios → `PAS_HIP_*`
+- `Pasivo_Corto_Plazo` — créditos consumo, tarjetas, colegios, jardines, arriendos, otros → `PAS_CON_*` + `PAS_TAR_*` + `PAS_COL_*` + `PAS_JAR_*` + `PAS_ARR_*` + `PAS_OTR_*`
+- `Objetivo_Ahorro` — metas con plazo y monto → `OBJ_*`
+- `Prevision_AFP` — saldo y proyección previsional → `AFP_*`
 
 **Prefijos de ID por clase:**
 ```
-ING_  →  ingresos
-GAS_  →  gastos (bucket en el nombre: GAS_ESE_, GAS_IMP_, GAS_ASP_)
-ACT_  →  activos
-PAS_  →  pasivos
-OBJ_  →  objetivos
-AFP_  →  previsión
+ING_             →  ingresos (ING_PRINCIPAL)
+GAS_             →  gastos (GAS_ESE_BUCKET, GAS_IMP_BUCKET, GAS_ASP_BUCKET)
+ACT_LIQUIDO_     →  activo líquido principal (solo uno: ACT_LIQUIDO_PRINCIPAL)
+ACT_LIQ_         →  activos líquidos adicionales
+                     Tipos: CC (cuenta corriente), CV (cuenta vista),
+                            DP (depósito a plazo), FM (fondo mutuo líquido)
+ACT_REAL_        →  activos reales vinculados a hipotecario (auto-creados)
+ACT_PROP_        →  propiedades sin hipotecario asociado
+ACT_INV_         →  inversiones financieras adicionales
+                     Tipos: FM, ETF, ACC, RF, CRIPTO
+AFP_             →  previsión AFP
+APV_             →  APV (ahorro previsional voluntario)
+PAS_HIP_         →  hipotecarios
+PAS_CON_         →  créditos de consumo
+PAS_TAR_         →  tarjetas de crédito
+PAS_COL_         →  colegios
+PAS_JAR_         →  jardines
+PAS_ARR_         →  arriendos
+PAS_OTR_         →  otros compromisos periódicos
+OBJ_             →  objetivos de ahorro
 ```
 
 ### Tablas_Desarrollo/Tabla_[ID_Posicion].csv — curva mensual por posición
@@ -136,6 +152,33 @@ Saldo_Actual, Instrumento, Tasa_Esperada_Anual, Aporte_Mensual_Requerido
 
 ---
 
+## Campos especiales por tipo de posición
+
+### Todos los pasivos (`Pasivo_Estructural` + `Pasivo_Corto_Plazo`)
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `Tipo_Pasivo` | `str` | Tipo específico dentro de la clase: `Hipotecario` / `Crédito consumo` / `Tarjeta` / `Colegio` / `Jardín` / `Arriendo` / `Otro` |
+| `bucket_vinculado` | `str` | ID del bucket de gasto asociado: `GAS_ESE_BUCKET` / `GAS_IMP_BUCKET` / `GAS_ASP_BUCKET` |
+| `Cuota_Vinculada_CLP` | `float` | Cuota mensual en CLP al momento de la vinculación |
+
+### Activos líquidos (`Activo_Liquido`)
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `Es_Fondo_Reserva` | `bool` | Si el saldo de esta posición cuenta como parte del fondo de reserva. Puede haber múltiples posiciones marcadas como `True` simultáneamente. `ACT_LIQUIDO_PRINCIPAL` es `True` por defecto. |
+
+### Activos reales (`Activo_Real`)
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `Valor_Comercial` | `float` | Valor estimado de mercado del activo |
+| `Fecha_Valoracion` | `str` | Fecha de la última estimación (ISO 8601) |
+| `Ingreso_Mensual` | `float` | Arriendo u otro ingreso mensual generado por el activo (suma a `_ing` en métricas) |
+| `Pasivo_Asociado` | `str` | ID del pasivo hipotecario vinculado (solo en `ACT_REAL_*` auto-creados) |
+
+---
+
 ## Lógica de capas progresivas
 
 Las capas se desbloquean secuencialmente. Cada una extiende el modelo sin romper lo anterior.
@@ -156,28 +199,84 @@ posicion_vida_v1 = activo_liquido / esenciales
 `meta_fondo_definida == True AND buckets_confirmados == True`
 
 ### Capa 2 — Control
-**Nuevos datos:** pasivos con tabla de desarrollo + saldo AFP
+**Nuevos datos:** pasivos con tabla de desarrollo + saldo AFP + activos líquidos + inversiones
 
 **Métricas adicionales:**
 ```python
-carga_financiera = sum(cuotas_pasivos) / ingreso  # benchmark: < 0.35
-posicion_vida_v2 = activo_liquido / (esenciales + sum(cuotas_pasivos))
+# Solo pasivos financieros (Hipotecario / Crédito consumo / Tarjeta):
+carga_financiera = sum(cuotas_fin) / ingreso       # benchmark: < 0.35
+cobertura_deuda  = activo_liquido / sum(cuotas_fin)
+
+# Todos los pasivos con cuota:
+posicion_vida_v2 = activo_liquido / (esenciales + sum(cuotas_todas))
+
+# Tasa de ahorro usa ingreso ING_PRINCIPAL solamente (sin arriendos):
+tasa_ahorro = margen_libre / ingreso_laboral
 ```
 
 **Generación automática de tablas:** cuando el usuario agrega un pasivo hipotecario,
 `core/schedule.py` genera la tabla de amortización completa (método francés por defecto).
 
+**Ingresos por arriendos:** `Activo_Real.Ingreso_Mensual` suma al ingreso total (`_ing`)
+pero no al ingreso laboral (`_ing_laboral`) usado para la tasa de ahorro.
+
 **Condición de desbloqueo Capa 3:**
 `len(pasivos_con_tabla) >= 1 AND afp_saldo is not None`
 
 ### Capa 3 — Crecimiento
-**Nuevos datos:** activos financieros + objetivos + parser cartolas disponible
+**Nuevos datos:** balance patrimonial + plan financiero agente + activos y objetivos gestionables
 
 **Condición de desbloqueo Capa 4:**
 `len(activos_con_tabla) >= 1 AND len(objetivos_activos) >= 1`
 
 ### Capa 4 — Pro
 ALM completo, stress testing, módulo EB2-NIW, exportación de reportes.
+
+---
+
+## Layout de páginas
+
+### pages/02_capa1_claridad.py
+- **Col izquierda:** métricas (PdV v1, Fondo Reserva, Margen Libre)
+- **Col derecha:** edición de parámetros (ingresos, gastos, liquidez, meta fondo)
+- Desglose visual de buckets con posiciones vinculadas y sugerencias pendientes
+
+### pages/03_capa2_control.py
+```
+SECCIÓN 1 — Ancho completo:
+  • Bloque HTML/CSS métricas (Carga Financiera, PdV v2, Cobertura, Tasa Ahorro, Horizonte)
+  • Gráfico stacked bars flujo neto mensual con línea de ingreso anotada
+  • st.divider()
+
+SECCIÓN 2 — Dos columnas iguales [1, 1]:
+  col_activos (izquierda) — 🟢 Activos e Inversiones:
+    Tab 🔵 Previsional   → AFP_PRINCIPAL + APV_* + resumen consolidado
+    Tab 📈 Inversiones   → ACT_LIQUIDO_* + ACT_LIQ_* + ACT_INV_*
+    Tab 🏡 Otros activos → ACT_REAL_* + ACT_PROP_*
+
+  col_pasivos (derecha) — 🔴 Pasivos y Compromisos:
+    Tab 🏠 Hipotecarios        → PAS_HIP_*
+    Tab 💳 Créditos            → PAS_CON_* + PAS_TAR_*
+    Tab 📚 Otros compromisos   → PAS_COL_* + PAS_JAR_* + PAS_ARR_* + PAS_OTR_*
+
+Footer — Ancho completo:
+  • Botón Guardar en Drive
+  • Bloque sugerencias pendientes
+  • Banner desbloqueo Capa 3
+```
+
+### pages/04_capa3_crecimiento.py
+```
+ZONA 1 — Balance patrimonial:
+  3 cards: Total Activos / Total Pasivos / Net Worth (Patrimonio Neto)
+
+ZONA 2 — Plan financiero agente (core/planner.py):
+  4 cards editables: Paso 1 (liquidar deudas) / Paso 2 (fondo reserva) /
+                     Paso 3 (pensión) / Paso 4 (acumulación)
+
+ZONA 3 — Expander gestionar activos y objetivos:
+  Formularios para ACT_INV_*, ACT_PROP_*, OBJ_*
+```
 
 ---
 
@@ -257,10 +356,27 @@ al valor real y se marca `dirty = True`.
 
 ### Clasificación de deudas
 
-**DEUDAS A LIQUIDAR (Paso 1):**
-Todas excepto hipotecarios — tarjetas, créditos consumo, leasing, cualquier pasivo sin
-garantía real inmobiliaria.
-Orden: mayor tasa primero (método avalanche).
+**TIPOS DE DEUDA FINANCIERA** (incluidas en Paso 1):
+```python
+TIPOS_DEUDA_FINANCIERA = {"Hipotecario", "Crédito consumo", "Tarjeta"}
+```
+Orden de liquidación: mayor tasa primero (método avalanche).
+
+**COMPROMISOS PERIÓDICOS** (excluidos del Paso 1 — no son deuda liquidable):
+`"Colegio"`, `"Jardín"`, `"Arriendo"`, `"Otro"`
+Estos compromisos sí aparecen en flujo neto mensual y en buckets de gasto.
+
+**INFERENCIA DE TIPO** desde prefijo de ID (fallback cuando `Tipo_Pasivo` no está en Drive):
+```
+PAS_HIP_*  →  Hipotecario
+PAS_CON_*  →  Crédito consumo
+PAS_TAR_*  →  Tarjeta
+PAS_COL_*  →  Colegio
+PAS_JAR_*  →  Jardín
+PAS_ARR_*  →  Arriendo
+Pasivo_Estructural sin tipo  →  Hipotecario (default)
+Resto  →  Otro
+```
 
 **DEUDAS ACEPTABLES:**
 Hipotecarios en UF únicamente.
@@ -399,12 +515,12 @@ Responde SOLO en JSON: {"ID_Posicion": "...", "Tipo_Flujo": "importado",
 | Fase | Capa | Estado |
 |---|---|---|
 | Fase 1 | Capa 1 | ✅ Completa — auth Drive, CSVs, dashboard, métricas |
-| Fase 2 | Capa 2-A | ✅ Completa — pasivos (5 tipos), tablas de desarrollo, LTV, normalización FX |
-| Fase 3 | Capa 2-B | ✅ Completa — AFP + APV + resumen previsional consolidado |
-| Fase 4 | Capa 2-C | 📋 Planificada — desagregación de buckets (modelo documentado) |
-| Fase 5 | Capa 3-A | 📋 Planificada — motor de objetivos |
-| Fase 6 | Capa 3-B | 📋 Planificada — agente parser cartolas |
-| Fase 7 | Capa 4 | 📋 Planificada — ALM completo |
+| Fase 2 | Capa 2-A | ✅ Completa — pasivos + tablas de desarrollo |
+| Fase 3 | Capa 2-B | ✅ Completa — AFP + APV |
+| Fase 4 | Capa 2-C | ✅ Completa — activos líquidos + inversiones + otros activos |
+| Fase 5 | Capa 3-A | ✅ Completa — balance patrimonial + agente planificador |
+| Fase 6 | Capa 3-B | 📋 Pendiente — parser cartolas PDF |
+| Fase 7 | Capa 4 | 📋 Pendiente — ALM completo + stress testing |
 
 ---
 
@@ -416,3 +532,7 @@ Responde SOLO en JSON: {"ID_Posicion": "...", "Tipo_Flujo": "importado",
 - **No hacer campos de resultado editables** — solo parámetros son editables por el usuario
 - **No asumir moneda CLP** — siempre respetar el campo `Moneda` de cada posición
 - **No usar `drive.readonly` scope** — el scope correcto es `drive.file` desde Capa 1
+- **No usar `·` (U+00B7) ni `⋅` (U+22C5) en f-strings de `st.markdown()`** — Streamlit los interpreta como cursiva o modo matemático; usar `" — "` o `" | "` en su lugar
+- **No incluir `Colegio` / `Jardín` / `Arriendo` en métricas de carga financiera** — solo `Hipotecario`, `Crédito consumo` y `Tarjeta` son deuda financiera real; tampoco incluirlos en Paso 1 del planner
+- **No hardcodear `ACT_LIQUIDO_PRINCIPAL` como único activo líquido** — siempre iterar sobre `Clase == "Activo_Liquido"` para sumar fondo de reserva y cobertura de deuda
+- **No asumir que `Tipo_Pasivo` existe en Drive** — usar `_inferir_tipo_pasivo()` como fallback antes de filtrar por tipo
