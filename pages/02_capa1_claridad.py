@@ -274,7 +274,11 @@ with col_right:
 
     pos_liq = _pos("ACT_LIQUIDO_PRINCIPAL")
     stored_liq = float(pos_liq.get("Saldo_Actual", 0))
-    stored_meses = int(pos_liq.get("Meses_Meta_Fondo", 3))
+    _meses_raw = pos_liq.get("Meses_Meta_Fondo", 3)
+    try:
+        stored_meses = int(float(_meses_raw))
+    except (ValueError, TypeError):
+        stored_meses = 3
 
     live_liq = _numinput(
         "Saldo líquido disponible",

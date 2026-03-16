@@ -274,9 +274,12 @@ _valor_real_clp: float = sum(
     for aid in _activos_reales_ids
 )
 
-# Activo líquido
-_liq_p = _pos("ACT_LIQUIDO_PRINCIPAL")
-_liq_clp = _clp(float(_liq_p.get("Saldo_Actual", 0)), _liq_p.get("Moneda", "CLP"))
+# Activos líquidos — suma de todas las posiciones Activo_Liquido
+_liq_ids_bal = state.list_positions(clase="Activo_Liquido")
+_liq_clp: float = sum(
+    _clp(float((_pos(lid) or {}).get("Saldo_Actual", 0)), (_pos(lid) or {}).get("Moneda", "CLP"))
+    for lid in _liq_ids_bal
+)
 
 # Pasivos
 _hipo_ids = state.list_positions(clase="Pasivo_Estructural")

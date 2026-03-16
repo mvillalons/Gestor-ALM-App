@@ -398,6 +398,19 @@ def _render_pasivo_form(tipo_forzado: str | None, tipos_disponibles: list[str],
             placeholder="Ej: Hipoteca departamento, Colegio hijo mayor…",
         )
 
+        # ── Asignar a bucket (solo en edición) ───────────────────────────
+        if edit_id:
+            _bucket_opts = {"Esenciales": "GAS_ESE_BUCKET", "Importantes": "GAS_IMP_BUCKET", "Aspiraciones": "GAS_ASP_BUCKET"}
+            _current_bucket_label = {v: k for k, v in _bucket_opts.items()}.get(
+                (state.get_position(edit_id) or {}).get("bucket_vinculado", ""), "Esenciales"
+            )
+            _nuevo_bucket_label = st.selectbox(
+                "Asignar a bucket",
+                list(_bucket_opts.keys()),
+                index=list(_bucket_opts.keys()).index(_current_bucket_label),
+                key=f"bucket_sel_{edit_id or 'new'}_{form_key}",
+            )
+
         # ── Campos específicos por tipo ──────────────────────────────────
         if tipo == "Hipotecario":
             _step = 1.0 if moneda_pas == "UF" else 1_000_000
@@ -576,19 +589,6 @@ def _render_pasivo_form(tipo_forzado: str | None, tipos_disponibles: list[str],
                 "Primera cuota",
                 value=date.fromisoformat(str(editing_params.get("Fecha_Inicio", date.today().isoformat()))),
                 key=f"c2_fecha_otro_{form_key}",
-            )
-
-        # Bucket selectbox en modo edición
-        if edit_id:
-            _bucket_opts = {"Esenciales": "GAS_ESE_BUCKET", "Importantes": "GAS_IMP_BUCKET", "Aspiraciones": "GAS_ASP_BUCKET"}
-            _current_bucket_label = {v: k for k, v in _bucket_opts.items()}.get(
-                (state.get_position(edit_id) or {}).get("bucket_vinculado", ""), "Esenciales"
-            )
-            _nuevo_bucket_label = st.selectbox(
-                "Asignar a bucket",
-                list(_bucket_opts.keys()),
-                index=list(_bucket_opts.keys()).index(_current_bucket_label),
-                key=f"bucket_sel_{edit_id or 'new'}_{form_key}",
             )
 
         # Botones del form
@@ -1457,12 +1457,16 @@ with col_right:
             with col_tot:
                 st.metric("💰 Total proyectado", f"$ {int(_total_proy):,}")
             with col_pen:
-                _anos_pension = max(1.0, 85.0 - _edad_jub_res)
-                _pension_men = _total_proy / (_anos_pension * 12)
+                _anos_pension = max(1, int(85 - _edad_jub_res))
+                _pension_men = calculator.calcular_pension_mensual(
+                    total_acumulado=_total_proy,
+                    anos_retiro=_anos_pension,
+                    tasa_retiro_anual=0.04,
+                )
                 st.metric(
                     "📅 Pensión mensual estimada",
                     f"$ {int(_pension_men):,}",
-                    help=f"Total ÷ ({85} − {int(_edad_jub_res)} años) ÷ 12 meses",
+                    help=f"Anualidad al 4% · {_anos_pension} años de retiro",
                 )
 
     # ── TAB 5 — Inversiones ───────────────────────────────────────────────────
@@ -1488,11 +1492,15 @@ with col_right:
         if liq_ids:
             for liq_id in liq_ids:
                 liq_p = state.get_position(liq_id) or {}
-                liq_desc = liq_p.get("Descripcion", liq_id)
-                liq_tipo = liq_p.get("Tipo_Activo", liq_p.get("Tipo", ""))
-                liq_saldo = float(liq_p.get("Saldo_Actual", 0))
-                liq_moneda = liq_p.get("Moneda", "CLP")
-                liq_venc = liq_p.get("Fecha_Vencimiento", "")
+                _raw_desc = liq_p.get("Descripcion") or liq_id
+                liq_desc = liq_id if str(_raw_desc) == "nan" else str(_raw_desc)
+                _raw_tipo = liq_p.get("Tipo_Activo") or liq_p.get("Tipo") or ""
+                liq_tipo = "" if str(_raw_tipo) == "nan" else str(_raw_tipo)
+                liq_saldo = float(liq_p.get("Saldo_Actual", 0) or 0)
+                _raw_moneda = liq_p.get("Moneda", "CLP")
+                liq_moneda = "CLP" if str(_raw_moneda) == "nan" else str(_raw_moneda)
+                _raw_venc = liq_p.get("Fecha_Vencimiento", "")
+                liq_venc = "" if str(_raw_venc) == "nan" else str(_raw_venc or "")
 
                 _liq_saldo_str = (
                     f"UF {liq_saldo:,.2f}" if liq_moneda == "UF"
@@ -1500,21 +1508,23 @@ with col_right:
                     else f"$ {int(liq_saldo):,}"
                 )
 
+                _es_fondo_res = bool(liq_p.get("Es_Fondo_Reserva", liq_id == "ACT_LIQUIDO_PRINCIPAL"))
                 c_liq1, c_liq2, c_liq3 = st.columns([5, 1, 1])
                 with c_liq1:
                     _liq_detail = f"**{liq_desc}**"
                     if liq_tipo:
                         _liq_detail += f" · *{liq_tipo}*"
+                    if _es_fondo_res:
+                        _liq_detail += " · 🏦 *Fondo de reserva*"
                     _liq_detail += f"  \nSaldo: {_liq_saldo_str}"
                     if liq_venc:
                         _liq_detail += f" · Vence: {liq_venc}"
                     st.markdown(_liq_detail)
                 with c_liq2:
-                    if liq_id != "ACT_LIQUIDO_PRINCIPAL":
-                        if st.button("✏️", key=f"edit_liq_{liq_id}", help="Editar"):
-                            st.session_state["c2_show_liq_form"] = True
-                            st.session_state["c2_edit_liq_id"] = liq_id
-                            st.rerun()
+                    if st.button("✏️", key=f"edit_liq_{liq_id}", help="Editar"):
+                        st.session_state["c2_show_liq_form"] = True
+                        st.session_state["c2_edit_liq_id"] = liq_id
+                        st.rerun()
                 with c_liq3:
                     if liq_id != "ACT_LIQUIDO_PRINCIPAL":
                         if st.button("🗑️", key=f"del_liq_{liq_id}", help="Eliminar"):
@@ -1524,13 +1534,29 @@ with col_right:
 
         # Total líquido y fondo de reserva
         _total_liq_tab = _activo_liq_total
-        _meses_fondo = (_total_liq_tab / _ese) if _ese > 0 else 0
-        _fondo_icon = "✅" if _meses_fondo >= 3 else "⚠️"
-        st.caption(
-            f"**Total líquido:** $ {int(_total_liq_tab):,}  ·  "
-            f"**Fondo de reserva:** {_meses_fondo:.1f} meses {_fondo_icon} "
-            f"(meta: 3 meses esenciales)"
+        # Fondo de reserva = suma de posiciones marcadas como Es_Fondo_Reserva
+        _fondo_reserva_ids = [
+            lid for lid in liq_ids
+            if bool((state.get_position(lid) or {}).get("Es_Fondo_Reserva", lid == "ACT_LIQUIDO_PRINCIPAL"))
+        ]
+        _total_fondo_reserva: float = sum(
+            calculator.normalizar_a_clp(
+                float((state.get_position(lid) or {}).get("Saldo_Actual", 0) or 0),
+                (state.get_position(lid) or {}).get("Moneda", "CLP"),
+                _valor_uf, _valor_usd,
+            )
+            for lid in _fondo_reserva_ids
         )
+        _meses_fondo = (_total_fondo_reserva / _ese) if _ese > 0 else 0
+        _fondo_icon = "✅" if _meses_fondo >= 3 else "⚠️"
+        _fondo_caption = (
+            f"**Total líquido:** $ {int(_total_liq_tab):,}  ·  "
+            f"🏦 **Fondo de reserva:** $ {int(_total_fondo_reserva):,} "
+            f"({_meses_fondo:.1f} meses {_fondo_icon}, meta: 3)"
+        )
+        if len(_fondo_reserva_ids) > 1:
+            _fondo_caption += f"  ·  {len(_fondo_reserva_ids)} cuentas marcadas"
+        st.caption(_fondo_caption)
 
         # Formulario nuevo activo líquido
         if show_liq_form:
@@ -1573,6 +1599,18 @@ with col_right:
                     format=_fmt_liq,
                     key="c2_liq_saldo",
                 )
+                # Es_Fondo_Reserva: ACT_LIQUIDO_PRINCIPAL defaults True, others False
+                _fondo_res_default = bool(
+                    liq_edit_p.get("Es_Fondo_Reserva", edit_liq_id == "ACT_LIQUIDO_PRINCIPAL")
+                    if edit_liq_id else False
+                )
+                es_fondo_reserva = st.checkbox(
+                    "🏦 Marcar como fondo de reserva",
+                    value=_fondo_res_default,
+                    key="c2_liq_fondo_reserva",
+                    help="Las cuentas marcadas se suman al cómputo del fondo de emergencia.",
+                )
+
                 liq_venc_in: str | None = None
                 if tipo_liq == "Depósito a plazo":
                     liq_venc_date = st.date_input(
@@ -1618,6 +1656,7 @@ with col_right:
                         "Moneda": liq_moneda_in,
                         "Capa_Activacion": 2,
                         "Saldo_Actual": liq_saldo_in,
+                        "Es_Fondo_Reserva": es_fondo_reserva,
                     }
                     if liq_venc_in:
                         liq_params["Fecha_Vencimiento"] = liq_venc_in
@@ -1837,11 +1876,8 @@ with col_right:
                 st.session_state.pop("c2_edit_ar_id", None)
                 st.rerun()
 
-        # Lista activos reales standalone (sin Pasivo_Asociado)
-        ar_ids = [
-            p for p in state.list_positions(clase="Activo_Real")
-            if not (state.get_position(p) or {}).get("Pasivo_Asociado")
-        ]
+        # Lista todos los activos reales (incluyendo los ligados a hipotecas)
+        ar_ids = state.list_positions(clase="Activo_Real")
 
         if ar_ids:
             st.divider()
@@ -1989,11 +2025,22 @@ with col_right:
 # ────────────────────────────────────────────────────────────────────────────
 
 # Datos base de Capa 1 — normalizados a CLP para comparabilidad entre monedas
-_ing = calculator.normalizar_a_clp(
+_ing_laboral = calculator.normalizar_a_clp(
     float(_pos("ING_PRINCIPAL").get("Monto_Mensual", 1)),
     _pos("ING_PRINCIPAL").get("Moneda", _MONEDA),
     _valor_uf, _valor_usd,
 )
+# Ingresos por arriendos (Activo_Real con Ingreso_Mensual > 0)
+_ing_arriendos: float = sum(
+    calculator.normalizar_a_clp(
+        float((_pos(ar) or {}).get("Ingreso_Mensual", 0) or 0),
+        (_pos(ar) or {}).get("Moneda", "CLP"),
+        _valor_uf, _valor_usd,
+    )
+    for ar in state.list_positions(clase="Activo_Real")
+    if float((_pos(ar) or {}).get("Ingreso_Mensual", 0) or 0) > 0
+)
+_ing = _ing_laboral + _ing_arriendos
 _ese = calculator.normalizar_a_clp(
     float(_pos("GAS_ESE_BUCKET").get("Monto_Mensual", 0)),
     _pos("GAS_ESE_BUCKET").get("Moneda", _MONEDA),
@@ -2097,12 +2144,15 @@ with _metrics_ph.container():
         _cf_label = "Saludable" if _cf < 0.35 else ("Precaución" if _cf < 0.50 else "Crítico")
         _cf_val = f"{_cf_icon} {_cf_pct:.1f}%"
         _cf_sub = f"{_cf_label} · Cuotas: $ {int(_total_cuotas_fin):,}/mes"
+        _cf_deuda = f"Deuda total: $ {int(_deuda_fin_total):,}"
     elif _ing > 0:
         _cf_val = "🟢 0.0%"
         _cf_sub = "Sin compromisos financieros"
+        _cf_deuda = ""
     else:
         _cf_val = "—"
         _cf_sub = "Define tu ingreso en Capa 1"
+        _cf_deuda = ""
 
     # Posición de vida v2
     _denominador_pdv = _ese + sum(_cuotas_clp)
@@ -2185,6 +2235,7 @@ with _metrics_ph.container():
       <div style="font-size:11px;color:#8fa0b0;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">CARGA FINANCIERA</div>
       <div style="font-size:36px;font-weight:700;color:#e8f0fe;">{_cf_val}</div>
       <div style="font-size:12px;color:#8fa0b0;margin-top:8px;">{_cf_sub}</div>
+      {"<div style='font-size:11px;color:#6a7f8e;margin-top:4px;'>" + _cf_deuda + "</div>" if _cf_deuda else ""}
     </div>
     <div style="flex:1;background:#1e2a3a;border-radius:8px;padding:20px;min-height:120px;">
       <div style="font-size:11px;color:#8fa0b0;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">POSICIÓN DE VIDA</div>
@@ -2210,6 +2261,14 @@ with _metrics_ph.container():
     </div>
   </div>
 </div>""", unsafe_allow_html=True)
+
+    # Desglose de ingresos si hay arriendos
+    if _ing_arriendos > 0:
+        st.caption(
+            f"💰 Ingreso laboral: **$ {int(_ing_laboral):,}** · "
+            f"🏡 Arriendos: **$ {int(_ing_arriendos):,}** · "
+            f"Total: **$ {int(_ing):,}**"
+        )
 
     st.divider()
 
@@ -2241,6 +2300,8 @@ with _metrics_ph.container():
     # Deuda financiera por período (solo Hipotecario, Crédito consumo, Tarjeta)
     _deuda_ch: dict[str, float] = {}
     for _p_ch in _pids_fin:
+        if _pos(_p_ch).get("bucket_vinculado"):
+            continue  # ya contado en _ese/_imp/_asp, no doblar
         _tab_ch = st.session_state.get("schedules", {}).get(_p_ch)
         if _tab_ch is None or _tab_ch.empty:
             continue
