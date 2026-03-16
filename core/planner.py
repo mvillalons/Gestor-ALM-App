@@ -43,6 +43,9 @@ ESTADO_COMPLETO: str = "completo"
 ESTADO_EN_CURSO: str = "en_curso"
 ESTADO_PENDIENTE: str = "pendiente"
 
+# Tipos de pasivo que se consideran deuda financiera en Paso 1
+TIPOS_DEUDA_FINANCIERA: set[str] = {"Hipotecario", "Crédito consumo", "Tarjeta"}
+
 # ---------------------------------------------------------------------------
 # Defaults del plan_params
 # ---------------------------------------------------------------------------
@@ -247,6 +250,9 @@ def _extraer_contexto(session_state: dict) -> dict:
     deudas: list[dict] = []
     for pid in deuda_ids:
         p = positions[pid]
+        tipo = p.get("Tipo_Pasivo", p.get("Tipo", ""))
+        if tipo not in TIPOS_DEUDA_FINANCIERA:
+            continue  # colegio, jardín, arriendo → no es deuda financiera
         saldo = _saldo_restante_clp(pid, positions, schedules, valor_uf, valor_usd)
         if saldo <= 0:
             continue

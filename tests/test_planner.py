@@ -219,6 +219,53 @@ class TestPaso1Deudas:
         # Hipotecario no debe aparecer como deuda a liquidar
         assert plan[0]["estado"] == planner.ESTADO_COMPLETO
 
+    def test_colegio_no_entra_en_paso1(self) -> None:
+        """Pasivo tipo 'Colegio' no debe aparecer en Paso 1 (no es deuda financiera)."""
+        ss = _ss_base()
+        ss["positions"]["PAS_COL_001"] = {
+            "Clase": "Pasivo_Corto_Plazo",
+            "Tipo": "Colegio",
+            "Descripcion": "Colegio hijo",
+            "Tasa_Anual": 0.0,
+            "Monto": 5_000_000,
+            "Moneda": "CLP",
+        }
+        plan = planner.generar_plan(ss)
+        assert plan[0]["estado"] == planner.ESTADO_COMPLETO
+        assert plan[0]["params"]["deudas_ordenadas"] == []
+
+    def test_credito_consumo_si_entra_en_paso1(self) -> None:
+        """Pasivo tipo 'Crédito consumo' SÍ debe aparecer en Paso 1."""
+        ss = _ss_base()
+        ss["positions"]["PAS_CON_001"] = {
+            "Clase": "Pasivo_Corto_Plazo",
+            "Tipo": "Crédito consumo",
+            "Descripcion": "Crédito BCI",
+            "Tasa_Anual": 0.15,
+            "Monto": 3_000_000,
+            "Moneda": "CLP",
+        }
+        plan = planner.generar_plan(ss)
+        assert plan[0]["estado"] == planner.ESTADO_EN_CURSO
+        deudas = plan[0]["params"]["deudas_ordenadas"]
+        assert len(deudas) == 1
+        assert deudas[0]["tipo"] == "Crédito consumo"
+
+    def test_jardin_no_entra_en_paso1(self) -> None:
+        """Pasivo tipo 'Jardín' no debe aparecer en Paso 1 (no es deuda financiera)."""
+        ss = _ss_base()
+        ss["positions"]["PAS_JAR_001"] = {
+            "Clase": "Pasivo_Corto_Plazo",
+            "Tipo": "Jardín",
+            "Descripcion": "Jardín infantil",
+            "Tasa_Anual": 0.0,
+            "Monto": 2_000_000,
+            "Moneda": "CLP",
+        }
+        plan = planner.generar_plan(ss)
+        assert plan[0]["estado"] == planner.ESTADO_COMPLETO
+        assert plan[0]["params"]["deudas_ordenadas"] == []
+
 
 # ---------------------------------------------------------------------------
 # 3. Paso 2 — Fondo de reserva

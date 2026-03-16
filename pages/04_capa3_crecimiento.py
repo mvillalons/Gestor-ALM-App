@@ -329,7 +329,7 @@ with _c_act:
             _fin_desc = _fin_p.get("Descripcion", _fin_id)
             _items_html += (
                 f"<p style='margin:2px 0; font-size:0.82rem;'>"
-                f"· {_fin_desc}: $ {int(_fin_clp):,}</p>"
+                f" —  {_fin_desc}: $ {int(_fin_clp):,}</p>"
             )
     if _activos_reales_ids:
         _items_html += (
@@ -342,7 +342,7 @@ with _c_act:
             _aval = _clp(float(_ap.get("Valor_Comercial", 0)), _ap.get("Moneda", "CLP"))
             _items_html += (
                 f"<p style='margin:2px 0; font-size:0.82rem;'>"
-                f"· {_ap.get('Descripcion', _aid)}: $ {int(_aval):,}</p>"
+                f" —  {_ap.get('Descripcion', _aid)}: $ {int(_aval):,}</p>"
             )
     if _liq_clp > 0:
         _items_html += (
@@ -350,7 +350,7 @@ with _c_act:
             "margin:8px 0 3px 0; text-transform:uppercase; letter-spacing:.05em;'>"
             "Líquidos</p>"
             f"<p style='margin:2px 0; font-size:0.82rem;'>"
-            f"· Cuenta principal: $ {int(_liq_clp):,}</p>"
+            f" —  Cuenta principal: $ {int(_liq_clp):,}</p>"
         )
     if not _items_html:
         _items_html = "<p style='color:#86efac; font-size:0.82rem;'>Sin activos registrados.</p>"
@@ -383,7 +383,7 @@ with _c_pas:
             _psaldo = _saldo_restante_deuda_clp(_pid)
             _pas_items_html += (
                 f"<p style='margin:2px 0; font-size:0.82rem;'>"
-                f"· {_pp.get('Descripcion', _pid)}: $ {int(_psaldo):,}</p>"
+                f" —  {_pp.get('Descripcion', _pid)}: $ {int(_psaldo):,}</p>"
             )
     if _consumo_ids:
         _pas_items_html += (
@@ -396,7 +396,7 @@ with _c_pas:
             _psaldo = _saldo_restante_deuda_clp(_pid)
             _pas_items_html += (
                 f"<p style='margin:2px 0; font-size:0.82rem;'>"
-                f"· {_pp.get('Descripcion', _pid)}: $ {int(_psaldo):,}</p>"
+                f" —  {_pp.get('Descripcion', _pid)}: $ {int(_psaldo):,}</p>"
             )
     if not _pas_items_html:
         _pas_items_html = "<p style='color:#fca5a5; font-size:0.82rem;'>Sin pasivos registrados.</p>"
@@ -674,7 +674,7 @@ if _sugerencias:
             _cs1, _cs2 = st.columns([4, 2])
             with _cs1:
                 st.markdown(
-                    f"**{_sug['descripcion']}** · *{_sug['tipo']}*  \n"
+                    f"**{_sug['descripcion']}**  —  *{_sug['tipo']}*  \n"
                     f"Vincular **$ {int(_sug['monto']):,}/mes** → {_bucket_lbl}"
                 )
                 if _sug.get("excede_espacio", False):

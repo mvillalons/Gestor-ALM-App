@@ -790,7 +790,7 @@ def _render_pasivo_form(tipo_forzado: str | None, tipos_disponibles: list[str],
 col_h1, col_h2 = st.columns([5, 1])
 with col_h1:
     nombre = st.session_state.get("nombre_usuario", "")
-    extra = f" · Hola, {nombre} 👋" if nombre else ""
+    extra = f"  —  Hola, {nombre} 👋" if nombre else ""
     st.title(f"Capa 2 — Control{extra}")
 with col_h2:
     lbl = state.status_label()
@@ -801,7 +801,9 @@ with col_h2:
 
 st.divider()
 
-# ── Dos columnas ──────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
+# Variables base — necesarias en métricas y tabs
+# ────────────────────────────────────────────────────────────────────────────
 
 # Activo liquido total — necesario en tabs e métricas
 _activo_liq_total = sum(
@@ -820,25 +822,391 @@ _ese = calculator.normalizar_a_clp(
     _valor_uf, _valor_usd,
 )
 
-col_left, col_right = st.columns([5, 7], gap="large")
-
-# Placeholder en columna izquierda — se llena después de procesar la derecha
-with col_left:
-    _metrics_ph = st.empty()
-
 # ────────────────────────────────────────────────────────────────────────────
-# COLUMNA DERECHA — 2 grupos de tabs
+# MÉTRICAS — calculadas desde session_state; renderizadas full-width al inicio
 # ────────────────────────────────────────────────────────────────────────────
 
-with col_right:
+# Datos base de Capa 1 — normalizados a CLP para comparabilidad entre monedas
+_ing_laboral = calculator.normalizar_a_clp(
+    float(_pos("ING_PRINCIPAL").get("Monto_Mensual", 1)),
+    _pos("ING_PRINCIPAL").get("Moneda", _MONEDA),
+    _valor_uf, _valor_usd,
+)
+# Ingresos por arriendos (Activo_Real con Ingreso_Mensual > 0)
+_ing_arriendos: float = sum(
+    calculator.normalizar_a_clp(
+        float((_pos(ar) or {}).get("Ingreso_Mensual", 0) or 0),
+        (_pos(ar) or {}).get("Moneda", "CLP"),
+        _valor_uf, _valor_usd,
+    )
+    for ar in state.list_positions(clase="Activo_Real")
+    if float((_pos(ar) or {}).get("Ingreso_Mensual", 0) or 0) > 0
+)
+_ing = _ing_laboral + _ing_arriendos
+_ese = calculator.normalizar_a_clp(
+    float(_pos("GAS_ESE_BUCKET").get("Monto_Mensual", 0)),
+    _pos("GAS_ESE_BUCKET").get("Moneda", _MONEDA),
+    _valor_uf, _valor_usd,
+)
+_liq = calculator.normalizar_a_clp(
+    float(_pos("ACT_LIQUIDO_PRINCIPAL").get("Saldo_Actual", 0)),
+    _pos("ACT_LIQUIDO_PRINCIPAL").get("Moneda", _MONEDA),
+    _valor_uf, _valor_usd,
+)
+
+# Cuotas normalizadas a CLP (cada pasivo puede estar en UF, USD o CLP)
+_cuotas_clp: list[float] = [
+    calculator.normalizar_a_clp(
+        _cuota_actual(pid),
+        _pos(pid).get("Moneda", "CLP"),
+        _valor_uf, _valor_usd,
+    )
+    for pid in _all_pasivo_ids()
+]
+
+# Tablas de pasivos (excluye AFP) para flujo neto
+_schedules_dict = st.session_state.get("schedules", {})
+_tablas_pasivos = [
+    df for pid, df in _schedules_dict.items()
+    if pid != "AFP_PRINCIPAL" and pid in _all_pasivo_ids()
+]
+
+# Horizonte libre — último período entre todos los pasivos
+_horizonte = "—"
+if _all_pasivo_ids():
+    terminos = [_fecha_termino(pid) for pid in _all_pasivo_ids() if _fecha_termino(pid) != "—"]
+    if terminos:
+        _horizonte = max(terminos)
+
+# Pasivos financieros (solo para carga financiera y cobertura de deuda)
+_TIPOS_FINANCIEROS = {"Hipotecario", "Crédito consumo", "Tarjeta"}
+_pids_fin = [p for p in _all_pasivo_ids() if _pos(p).get("Tipo") in _TIPOS_FINANCIEROS]
+_cuotas_fin_clp: list[float] = [
+    calculator.normalizar_a_clp(
+        _cuota_actual(p),
+        _pos(p).get("Moneda", "CLP"),
+        _valor_uf, _valor_usd,
+    )
+    for p in _pids_fin
+]
+_total_cuotas_fin = sum(_cuotas_fin_clp)
+
+# Deuda total financiera (solo pasivos financieros, desde schedules)
+_hoy_str_cob = date.today().strftime("%Y-%m")
+_deuda_fin_total = 0.0
+for _p_fin in _pids_fin:
+    _tabla_fin = st.session_state.get("schedules", {}).get(_p_fin)
+    if _tabla_fin is not None and not _tabla_fin.empty:
+        _fut_fin = _tabla_fin[_tabla_fin["Periodo"] >= _hoy_str_cob]
+        _saldo_fin = float(_fut_fin["Saldo_Inicial"].iloc[0]) if not _fut_fin.empty else 0.0
+    else:
+        _saldo_fin = float(_pos(_p_fin).get("Capital", 0))
+    _deuda_fin_total += calculator.normalizar_a_clp(
+        abs(_saldo_fin), _pos(_p_fin).get("Moneda", "CLP"), _valor_uf, _valor_usd
+    )
+
+# ── Tipo de cambio (configuración manual) ─────────────────────────────────
+with st.expander("⚙️ Tipo de cambio", expanded=False):
+    st.caption(
+        "El sistema usa estos valores para convertir flujos en UF y USD a CLP "
+        "en todas las métricas. Actualiza manualmente con el valor del día."
+    )
+    _col_uf, _col_usd = st.columns(2)
+    with _col_uf:
+        st.number_input(
+            "Valor UF (CLP/UF)",
+            min_value=1.0,
+            value=float(st.session_state.get("valor_uf", 39_700.0)),
+            step=100.0,
+            format="%.0f",
+            key="valor_uf",
+            help="Fuente: Banco Central de Chile (www.bcentral.cl)",
+        )
+    with _col_usd:
+        st.number_input(
+            "Dólar USD (CLP/USD)",
+            min_value=1.0,
+            value=float(st.session_state.get("valor_usd", 950.0)),
+            step=10.0,
+            format="%.0f",
+            key="valor_usd",
+            help="Tipo de cambio observado del día.",
+        )
+
+st.divider()
+
+# ── Métricas — cálculo de variables ───────────────────────────────────────
+# Carga financiera (solo pasivos financieros: Hipotecario, Crédito consumo, Tarjeta)
+if _ing > 0 and _cuotas_fin_clp:
+    _cf = calculator.carga_financiera(_cuotas_fin_clp, _ing)
+    _cf_pct = _cf * 100
+    _cf_icon = "🟢" if _cf < 0.35 else ("🟡" if _cf < 0.50 else "🔴")
+    _cf_label = "Saludable" if _cf < 0.35 else ("Precaución" if _cf < 0.50 else "Crítico")
+    _cf_val = f"{_cf_icon} {_cf_pct:.1f}%"
+    _cf_sub = f"{_cf_label} — Cuotas: $ {int(_total_cuotas_fin):,}/mes"
+    _cf_deuda = f"Deuda total: $ {int(_deuda_fin_total):,}"
+elif _ing > 0:
+    _cf_val = "🟢 0.0%"
+    _cf_sub = "Sin compromisos financieros"
+    _cf_deuda = ""
+else:
+    _cf_val = "—"
+    _cf_sub = "Define tu ingreso en Capa 1"
+    _cf_deuda = ""
+
+# Posición de vida v2
+_denominador_pdv = _ese + sum(_cuotas_clp)
+if _denominador_pdv > 0:
+    _pdv = calculator.posicion_vida_v2(_liq, _ese, _cuotas_clp)
+    _pdv_icon = "🟢" if _pdv >= 3 else ("🟡" if _pdv >= 1 else "🔴")
+    _pdv_val = f"{_pdv_icon} {_pdv:.1f} meses"
+    _pdv_sub = "Liquidez / (Esenciales + Cuotas)"
+else:
+    _pdv_val = "—"
+    _pdv_sub = "Agrega pasivos y define esenciales"
+
+# Cobertura de deuda (activo = todas posiciones Activo_Liquido; deuda = solo financieros)
+if _deuda_fin_total > 0:
+    _cob = calculator.cobertura_deuda(_activo_liq_total, _deuda_fin_total)
+    _cob_pct = _cob * 100
+    _cob_icon = "🟢" if _cob > 0.20 else ("🟡" if _cob > 0.10 else "🔴")
+    _cob_val = f"{_cob_icon} {_cob_pct:.1f}%"
+    _cob_sub = f"Liquidez: $ {int(_activo_liq_total):,} / Deuda fin."
+else:
+    _cob_val = "—"
+    _cob_sub = "Sin deuda financiera registrada"
+
+# Tasa de ahorro real
+_aporte_afp_m = float(
+    (state.get_position("AFP_PRINCIPAL") or {}).get("Aporte_Mensual", 0)
+)
+_aporte_apv_m = sum(
+    float((state.get_position(p) or {}).get("Aporte_Mensual", 0))
+    for p in _all_apv_ids()
+)
+_aporte_inv_m = sum(
+    float((state.get_position(p) or {}).get("Aporte_Mensual", 0))
+    for p in state.list_positions(clase="Activo_Financiero")
+    if p.startswith("ACT_INV_")
+)
+_ing_params_liv = _pos("ING_PRINCIPAL")
+if "Monto_Mensual" in _ing_params_liv:
+    _ing_live = float(_ing_params_liv["Monto_Mensual"])
+elif "Ingreso_Mensual" in _ing_params_liv:
+    _ing_live = float(_ing_params_liv["Ingreso_Mensual"])
+else:
+    _ing_live = float(st.session_state.get("ingreso_mensual", st.session_state.get("live_ing", 0)))
+_ing_live = calculator.normalizar_a_clp(
+    _ing_live,
+    _ing_params_liv.get("Moneda", "CLP"),
+    _valor_uf, _valor_usd,
+)
+if _ing_live > 0:
+    _tasa = calculator.tasa_ahorro_real(
+        _aporte_afp_m + _aporte_apv_m + _aporte_inv_m, _ing_live
+    )
+    _tasa_pct = _tasa * 100
+    _tasa_icon = "🟢" if _tasa > 0.15 else ("🟡" if _tasa > 0.10 else "🔴")
+    _ahr_val = f"{_tasa_icon} {_tasa_pct:.1f}%"
+    _ahr_sub = "Inversión mensual / Ingreso"
+else:
+    _ahr_val = "—"
+    _ahr_sub = "Define tu ingreso en Capa 1"
+
+# Horizonte libre — formatear para display
+_MESES_CORTO = ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
+                "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+if _horizonte != "—":
+    try:
+        _y_h, _m_h = _horizonte.split("-")
+        _horizonte_display = f"{_MESES_CORTO[int(_m_h) - 1]} {_y_h}"
+    except Exception:
+        _horizonte_display = _horizonte
+else:
+    _horizonte_display = "Sin compromisos"
+_n_comp = len(_all_pasivo_ids())
+_h_sub = f"{_n_comp} compromiso{'s' if _n_comp != 1 else ''}" if _n_comp else "Agrega pasivos"
+
+# ── Métricas — tarjetas HTML/CSS ──────────────────────────────────────────
+st.markdown(f"""
+<div style="display:flex;flex-direction:column;gap:12px;margin-bottom:8px;">
+  <div style="display:flex;gap:12px;">
+    <div style="flex:1;background:#1e2a3a;border-radius:8px;padding:20px;min-height:120px;">
+      <div style="font-size:11px;color:#8fa0b0;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">CARGA FINANCIERA</div>
+      <div style="font-size:36px;font-weight:700;color:#e8f0fe;">{_cf_val}</div>
+      <div style="font-size:12px;color:#8fa0b0;margin-top:8px;">{_cf_sub}</div>
+      {"<div style='font-size:11px;color:#6a7f8e;margin-top:4px;'>" + _cf_deuda + "</div>" if _cf_deuda else ""}
+    </div>
+    <div style="flex:1;background:#1e2a3a;border-radius:8px;padding:20px;min-height:120px;">
+      <div style="font-size:11px;color:#8fa0b0;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">POSICIÓN DE VIDA</div>
+      <div style="font-size:36px;font-weight:700;color:#e8f0fe;">{_pdv_val}</div>
+      <div style="font-size:12px;color:#8fa0b0;margin-top:8px;">{_pdv_sub}</div>
+    </div>
+  </div>
+  <div style="display:flex;gap:12px;">
+    <div style="flex:1;background:#1a2230;border-radius:8px;padding:16px;">
+      <div style="font-size:10px;color:#8fa0b0;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">COBERTURA DEUDA</div>
+      <div style="font-size:24px;font-weight:700;color:#e8f0fe;">{_cob_val}</div>
+      <div style="font-size:11px;color:#8fa0b0;margin-top:4px;">{_cob_sub}</div>
+    </div>
+    <div style="flex:1;background:#1a2230;border-radius:8px;padding:16px;">
+      <div style="font-size:10px;color:#8fa0b0;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">TASA DE AHORRO</div>
+      <div style="font-size:24px;font-weight:700;color:#e8f0fe;">{_ahr_val}</div>
+      <div style="font-size:11px;color:#8fa0b0;margin-top:4px;">{_ahr_sub}</div>
+    </div>
+    <div style="flex:1;background:#1a2230;border-radius:8px;padding:16px;">
+      <div style="font-size:10px;color:#8fa0b0;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">HORIZONTE LIBRE</div>
+      <div style="font-size:20px;font-weight:700;color:#e8f0fe;">🏁 {_horizonte_display}</div>
+      <div style="font-size:11px;color:#8fa0b0;margin-top:4px;">{_h_sub}</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+# Desglose de ingresos si hay arriendos
+if _ing_arriendos > 0:
+    st.caption(
+        f"💰 Ingreso laboral: **$ {int(_ing_laboral):,}** — "
+        f"🏡 Arriendos: **$ {int(_ing_arriendos):,}** — "
+        f"Total: **$ {int(_ing):,}**"
+    )
+
+# ── Flujo mensual — gráfico de barras apiladas ────────────────────────────
+st.markdown("#### Flujo Mensual por Categoría")
+
+# Construir series de 24 meses
+_today_ch = date.today()
+_periodos_ch: list[str] = []
+_y_ch, _m_ch = _today_ch.year, _today_ch.month
+for _ in range(24):
+    _periodos_ch.append(f"{_y_ch}-{_m_ch:02d}")
+    _m_ch += 1
+    if _m_ch > 12:
+        _m_ch = 1
+        _y_ch += 1
+
+_imp_ch = calculator.normalizar_a_clp(
+    float(_pos("GAS_IMP_BUCKET").get("Monto_Mensual", 0)),
+    _pos("GAS_IMP_BUCKET").get("Moneda", _MONEDA),
+    _valor_uf, _valor_usd,
+)
+_asp_ch = calculator.normalizar_a_clp(
+    float(_pos("GAS_ASP_BUCKET").get("Monto_Mensual", 0)),
+    _pos("GAS_ASP_BUCKET").get("Moneda", _MONEDA),
+    _valor_uf, _valor_usd,
+)
+
+# Deuda financiera por período (solo Hipotecario, Crédito consumo, Tarjeta)
+_deuda_ch: dict[str, float] = {}
+for _p_ch in _pids_fin:
+    if _pos(_p_ch).get("bucket_vinculado"):
+        continue  # ya contado en _ese/_imp/_asp, no doblar
+    _tab_ch = st.session_state.get("schedules", {}).get(_p_ch)
+    if _tab_ch is None or _tab_ch.empty:
+        continue
+    _mon_ch = _pos(_p_ch).get("Moneda", "CLP")
+    for _per_ch in _periodos_ch:
+        _row_ch = _tab_ch[_tab_ch["Periodo"] == _per_ch]
+        if not _row_ch.empty:
+            _cuota_ch = abs(float(_row_ch["Flujo_Periodo"].iloc[0]))
+            _cuota_clp_ch = calculator.normalizar_a_clp(_cuota_ch, _mon_ch, _valor_uf, _valor_usd)
+            _deuda_ch[_per_ch] = _deuda_ch.get(_per_ch, 0.0) + _cuota_clp_ch
+
+_ese_ser = [_ese] * 24
+_imp_ser = [_imp_ch] * 24
+_asp_ser = [_asp_ch] * 24
+_deuda_ser = [_deuda_ch.get(p, 0.0) for p in _periodos_ch]
+_exceso_ser = [
+    _ing - (_ese_ser[i] + _imp_ser[i] + _asp_ser[i] + _deuda_ser[i])
+    for i in range(24)
+]
+
+if _ing > 0 or any(v > 0 for v in _deuda_ser):
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        name="Esenciales", x=_periodos_ch, y=_ese_ser,
+        marker_color="#1e4d8c",
+        hovertemplate="%{x}<br>Esenciales: %{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        name="Importantes", x=_periodos_ch, y=_imp_ser,
+        marker_color="#2e6da4",
+        hovertemplate="%{x}<br>Importantes: %{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        name="Aspiraciones", x=_periodos_ch, y=_asp_ser,
+        marker_color="#4a9fd4",
+        hovertemplate="%{x}<br>Aspiraciones: %{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        name="Deuda financiera", x=_periodos_ch, y=_deuda_ser,
+        marker_color="#c0392b",
+        hovertemplate="%{x}<br>Deuda fin.: %{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        name="Exceso/Déficit", x=_periodos_ch, y=_exceso_ser,
+        marker_color=["#27ae60" if v >= 0 else "#e74c3c" for v in _exceso_ser],
+        hovertemplate="%{x}<br>Exceso/Déficit: %{y:,.0f}<extra></extra>",
+    ))
+    fig.update_layout(
+        barmode="relative",
+        height=260,
+        margin=dict(l=0, r=0, t=8, b=0),
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                    font=dict(size=9)),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.1)", zeroline=True,
+                   zerolinecolor="#888"),
+        xaxis=dict(tickangle=-45, tickfont=dict(size=9)),
+    )
+    if _ing > 0:
+        _ing_laboral = _ing - _ing_arriendos
+        if _ing_arriendos > 0:
+            _ing_label = (
+                f"Ingreso: ${_ing:,.0f}/mes "
+                f"(laboral ${_ing_laboral:,.0f} + "
+                f"arriendos ${_ing_arriendos:,.0f})"
+            )
+        else:
+            _ing_label = f"Ingreso: ${_ing:,.0f}/mes"
+
+        fig.add_hline(
+            y=_ing,
+            line_dash="dot",
+            line_color="white",
+            line_width=2,
+            annotation_text=_ing_label,
+            annotation_position="top right",
+            annotation_font_color="white",
+            annotation_font_size=11,
+        )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    _meses_deficit = sum(1 for v in _exceso_ser if v < 0)
+    if _meses_deficit:
+        st.warning(f"⚠️ {_meses_deficit} meses en déficit en los próximos 24 meses.")
+    else:
+        st.success("✓ Sin meses en déficit en los próximos 24 meses.")
+else:
+    st.caption("Agrega ingresos y compromisos para ver el flujo mensual.")
+
+st.divider()
+
+# ────────────────────────────────────────────────────────────────────────────
+# SECCIÓN 2 — Dos columnas iguales: Activos | Pasivos
+# ────────────────────────────────────────────────────────────────────────────
+
+# ────────────────────────────────────────────────────────────────────────────
+# SECCIÓN 2 — Dos columnas iguales: Activos | Pasivos
+# ────────────────────────────────────────────────────────────────────────────
+
+col_activos, col_pasivos = st.columns([1, 1])
+
+with col_pasivos:
     st.markdown("#### 🔴 Pasivos y Compromisos")
     tab1, tab2, tab3 = st.tabs([
         "🏠 Hipotecarios", "💳 Créditos", "📚 Otros compromisos",
-    ])
-    st.markdown("---")
-    st.markdown("#### 🟢 Activos e Inversiones")
-    tab4, tab5, tab6 = st.tabs([
-        "🔵 Previsional", "📈 Inversiones", "🏡 Otros activos",
     ])
 
     # ── TAB 1 — Hipotecarios ──────────────────────────────────────────────────
@@ -890,8 +1258,8 @@ with col_right:
                             _saldo_str = _fmt(saldo_p)
                             _cuota_str = _fmt(cuota_p)
                         st.markdown(
-                            f"**{desc_p}** · *Hipotecario*  \n"
-                            f"Saldo {_saldo_str} · Cuota {_cuota_str}/mes · "
+                            f"**{desc_p}**  —  *Hipotecario*  \n"
+                            f"Saldo {_saldo_str}  —  Cuota {_cuota_str}/mes  —  "
                             f"Término {termino_p}  \n"
                             f"Bucket: {_bucket_badge(pid)}"
                         )
@@ -910,7 +1278,7 @@ with col_right:
                                 else:
                                     _ltv_icon, _ltv_color = "🔴", "red"
                                 st.caption(
-                                    f"{_ltv_icon} LTV: :{_ltv_color}[**{_ltv_pct:.1f}%**] · "
+                                    f"{_ltv_icon} LTV: :{_ltv_color}[**{_ltv_pct:.1f}%**]  —  "
                                     f"Patrimonio neto: **{_fmt(_patr_neto)}**"
                                 )
                     with c2:
@@ -982,8 +1350,8 @@ with col_right:
                             _saldo_str = _fmt(saldo_p)
                             _cuota_str = _fmt(cuota_p)
                         st.markdown(
-                            f"**{desc_p}** · *{tipo_p}*  \n"
-                            f"Saldo {_saldo_str} · Cuota {_cuota_str}/mes · "
+                            f"**{desc_p}**  —  *{tipo_p}*  \n"
+                            f"Saldo {_saldo_str}  —  Cuota {_cuota_str}/mes  —  "
                             f"Término {termino_p}  \n"
                             f"Bucket: {_bucket_badge(pid)}"
                         )
@@ -1056,8 +1424,8 @@ with col_right:
                             _saldo_str = _fmt(saldo_p)
                             _cuota_str = _fmt(cuota_p)
                         st.markdown(
-                            f"**{desc_p}** · *{tipo_p}*  \n"
-                            f"Saldo {_saldo_str} · Cuota {_cuota_str}/mes · "
+                            f"**{desc_p}**  —  *{tipo_p}*  \n"
+                            f"Saldo {_saldo_str}  —  Cuota {_cuota_str}/mes  —  "
                             f"Término {termino_p}  \n"
                             f"Bucket: {_bucket_badge(pid)}"
                         )
@@ -1072,6 +1440,12 @@ with col_right:
                             st.rerun()
         elif not show_form_otros:
             st.info("Aún no registraste colegios, arriendos u otros compromisos.")
+
+with col_activos:
+    st.markdown("#### 🟢 Activos e Inversiones")
+    tab4, tab5, tab6 = st.tabs([
+        "🔵 Previsional", "📈 Inversiones", "🏡 Otros activos",
+    ])
 
     # ── TAB 4 — Previsional ───────────────────────────────────────────────────
     with tab4:
@@ -1097,8 +1471,8 @@ with col_right:
                     else afp_saldo_val
                 )
                 st.markdown(
-                    f"Saldo actual **{_fmt(afp_saldo_val)}** · "
-                    f"Aporte **{_fmt(afp_aporte)}/mes** · "
+                    f"Saldo actual **{_fmt(afp_saldo_val)}**  —  "
+                    f"Aporte **{_fmt(afp_aporte)}/mes**  —  "
                     f"Proyección a los {int(afp_edad_jub)} años: **{_fmt(saldo_final_afp)}**"
                 )
             with c_afp2:
@@ -1251,13 +1625,13 @@ with col_right:
                 c_apv1, c_apv2, c_apv3 = st.columns([5, 1, 1])
                 with c_apv1:
                     st.markdown(
-                        f"**{apv_p.get('Descripcion', apv_id)}** · "
-                        f"Saldo {_fmt(apv_saldo_val)} · "
+                        f"**{apv_p.get('Descripcion', apv_id)}**  —  "
+                        f"Saldo {_fmt(apv_saldo_val)}  —  "
                         f"Proyección {_fmt(apv_proy)}"
                     )
                     _reg = apv_p.get("Regimen_Tributario", "")
                     if _reg:
-                        st.caption(f"Régimen {_reg} · Tasa {apv_p.get('Tasa_Anual_Pct', 5.0):.1f}% anual")
+                        st.caption(f"Régimen {_reg}  —  Tasa {apv_p.get('Tasa_Anual_Pct', 5.0):.1f}% anual")
                 with c_apv2:
                     if st.button("✏️", key=f"edit_apv_{apv_id}", help="Editar"):
                         st.session_state["c2_show_apv_form"] = True
@@ -1466,7 +1840,7 @@ with col_right:
                 st.metric(
                     "📅 Pensión mensual estimada",
                     f"$ {int(_pension_men):,}",
-                    help=f"Anualidad al 4% · {_anos_pension} años de retiro",
+                    help=f"Anualidad al 4%  —  {_anos_pension} años de retiro",
                 )
 
     # ── TAB 5 — Inversiones ───────────────────────────────────────────────────
@@ -1513,12 +1887,12 @@ with col_right:
                 with c_liq1:
                     _liq_detail = f"**{liq_desc}**"
                     if liq_tipo:
-                        _liq_detail += f" · *{liq_tipo}*"
+                        _liq_detail += f"  —  *{liq_tipo}*"
                     if _es_fondo_res:
-                        _liq_detail += " · 🏦 *Fondo de reserva*"
+                        _liq_detail += "  —  🏦 *Fondo de reserva*"
                     _liq_detail += f"  \nSaldo: {_liq_saldo_str}"
                     if liq_venc:
-                        _liq_detail += f" · Vence: {liq_venc}"
+                        _liq_detail += f"  —  Vence: {liq_venc}"
                     st.markdown(_liq_detail)
                 with c_liq2:
                     if st.button("✏️", key=f"edit_liq_{liq_id}", help="Editar"):
@@ -1550,12 +1924,12 @@ with col_right:
         _meses_fondo = (_total_fondo_reserva / _ese) if _ese > 0 else 0
         _fondo_icon = "✅" if _meses_fondo >= 3 else "⚠️"
         _fondo_caption = (
-            f"**Total líquido:** $ {int(_total_liq_tab):,}  ·  "
+            f"**Total líquido:** $ {int(_total_liq_tab):,}   —   "
             f"🏦 **Fondo de reserva:** $ {int(_total_fondo_reserva):,} "
             f"({_meses_fondo:.1f} meses {_fondo_icon}, meta: 3)"
         )
         if len(_fondo_reserva_ids) > 1:
-            _fondo_caption += f"  ·  {len(_fondo_reserva_ids)} cuentas marcadas"
+            _fondo_caption += f"   —   {len(_fondo_reserva_ids)} cuentas marcadas"
         st.caption(_fondo_caption)
 
         # Formulario nuevo activo líquido
@@ -1718,11 +2092,11 @@ with col_right:
                 c_inv1, c_inv2, c_inv3 = st.columns([5, 1, 1])
                 with c_inv1:
                     st.markdown(
-                        f"**{inv_desc}** · *{inv_tipo}*  \n"
-                        f"Saldo {_fmt(inv_saldo)} · Proyección {_fmt(inv_proy)} "
+                        f"**{inv_desc}**  —  *{inv_tipo}*  \n"
+                        f"Saldo {_fmt(inv_saldo)}  —  Proyección {_fmt(inv_proy)} "
                         f"(horizonte {inv_horizonte // 12} años)"
                     )
-                    st.caption(f"Tasa esperada: {inv_tasa*100:.1f}% anual · Moneda: {inv_moneda}")
+                    st.caption(f"Tasa esperada: {inv_tasa*100:.1f}% anual  —  Moneda: {inv_moneda}")
                 with c_inv2:
                     if st.button("✏️", key=f"edit_inv_{inv_id}", help="Editar"):
                         st.session_state["c2_show_inv_form"] = True
@@ -1903,8 +2277,8 @@ with col_right:
                         else f"$ {int(ar_ingreso):,}"
                     )
                     st.markdown(
-                        f"**{ar_desc}** · *{ar_tipo}*  \n"
-                        f"Valor {_val_str} · Ingreso mensual {_ing_str}  \n"
+                        f"**{ar_desc}**  —  *{ar_tipo}*  \n"
+                        f"Valor {_val_str}  —  Ingreso mensual {_ing_str}  \n"
                         f"Valoración: {ar_fecha}"
                     )
                 with c_ar2:
@@ -2020,366 +2394,6 @@ with col_right:
                     st.session_state.pop("c2_edit_ar_id", None)
                     st.rerun()
 
-# ────────────────────────────────────────────────────────────────────────────
-# MÉTRICAS — calculadas desde session_state; renderizadas en el placeholder
-# ────────────────────────────────────────────────────────────────────────────
-
-# Datos base de Capa 1 — normalizados a CLP para comparabilidad entre monedas
-_ing_laboral = calculator.normalizar_a_clp(
-    float(_pos("ING_PRINCIPAL").get("Monto_Mensual", 1)),
-    _pos("ING_PRINCIPAL").get("Moneda", _MONEDA),
-    _valor_uf, _valor_usd,
-)
-# Ingresos por arriendos (Activo_Real con Ingreso_Mensual > 0)
-_ing_arriendos: float = sum(
-    calculator.normalizar_a_clp(
-        float((_pos(ar) or {}).get("Ingreso_Mensual", 0) or 0),
-        (_pos(ar) or {}).get("Moneda", "CLP"),
-        _valor_uf, _valor_usd,
-    )
-    for ar in state.list_positions(clase="Activo_Real")
-    if float((_pos(ar) or {}).get("Ingreso_Mensual", 0) or 0) > 0
-)
-_ing = _ing_laboral + _ing_arriendos
-_ese = calculator.normalizar_a_clp(
-    float(_pos("GAS_ESE_BUCKET").get("Monto_Mensual", 0)),
-    _pos("GAS_ESE_BUCKET").get("Moneda", _MONEDA),
-    _valor_uf, _valor_usd,
-)
-_liq = calculator.normalizar_a_clp(
-    float(_pos("ACT_LIQUIDO_PRINCIPAL").get("Saldo_Actual", 0)),
-    _pos("ACT_LIQUIDO_PRINCIPAL").get("Moneda", _MONEDA),
-    _valor_uf, _valor_usd,
-)
-
-# Cuotas normalizadas a CLP (cada pasivo puede estar en UF, USD o CLP)
-_cuotas_clp: list[float] = [
-    calculator.normalizar_a_clp(
-        _cuota_actual(pid),
-        _pos(pid).get("Moneda", "CLP"),
-        _valor_uf, _valor_usd,
-    )
-    for pid in _all_pasivo_ids()
-]
-
-# Tablas de pasivos (excluye AFP) para flujo neto
-_schedules_dict = st.session_state.get("schedules", {})
-_tablas_pasivos = [
-    df for pid, df in _schedules_dict.items()
-    if pid != "AFP_PRINCIPAL" and pid in _all_pasivo_ids()
-]
-
-# Horizonte libre — último período entre todos los pasivos
-_horizonte = "—"
-if _all_pasivo_ids():
-    terminos = [_fecha_termino(pid) for pid in _all_pasivo_ids() if _fecha_termino(pid) != "—"]
-    if terminos:
-        _horizonte = max(terminos)
-
-# Pasivos financieros (solo para carga financiera y cobertura de deuda)
-_TIPOS_FINANCIEROS = {"Hipotecario", "Crédito consumo", "Tarjeta"}
-_pids_fin = [p for p in _all_pasivo_ids() if _pos(p).get("Tipo") in _TIPOS_FINANCIEROS]
-_cuotas_fin_clp: list[float] = [
-    calculator.normalizar_a_clp(
-        _cuota_actual(p),
-        _pos(p).get("Moneda", "CLP"),
-        _valor_uf, _valor_usd,
-    )
-    for p in _pids_fin
-]
-_total_cuotas_fin = sum(_cuotas_fin_clp)
-
-# Deuda total financiera (solo pasivos financieros, desde schedules)
-_hoy_str_cob = date.today().strftime("%Y-%m")
-_deuda_fin_total = 0.0
-for _p_fin in _pids_fin:
-    _tabla_fin = st.session_state.get("schedules", {}).get(_p_fin)
-    if _tabla_fin is not None and not _tabla_fin.empty:
-        _fut_fin = _tabla_fin[_tabla_fin["Periodo"] >= _hoy_str_cob]
-        _saldo_fin = float(_fut_fin["Saldo_Inicial"].iloc[0]) if not _fut_fin.empty else 0.0
-    else:
-        _saldo_fin = float(_pos(_p_fin).get("Capital", 0))
-    _deuda_fin_total += calculator.normalizar_a_clp(
-        abs(_saldo_fin), _pos(_p_fin).get("Moneda", "CLP"), _valor_uf, _valor_usd
-    )
-
-with _metrics_ph.container():
-
-    # ── Tipo de cambio (configuración manual) ─────────────────────────────────
-    with st.expander("⚙️ Tipo de cambio", expanded=False):
-        st.caption(
-            "El sistema usa estos valores para convertir flujos en UF y USD a CLP "
-            "en todas las métricas. Actualiza manualmente con el valor del día."
-        )
-        _col_uf, _col_usd = st.columns(2)
-        with _col_uf:
-            st.number_input(
-                "Valor UF (CLP/UF)",
-                min_value=1.0,
-                value=float(st.session_state.get("valor_uf", 39_700.0)),
-                step=100.0,
-                format="%.0f",
-                key="valor_uf",
-                help="Fuente: Banco Central de Chile (www.bcentral.cl)",
-            )
-        with _col_usd:
-            st.number_input(
-                "Dólar USD (CLP/USD)",
-                min_value=1.0,
-                value=float(st.session_state.get("valor_usd", 950.0)),
-                step=10.0,
-                format="%.0f",
-                key="valor_usd",
-                help="Tipo de cambio observado del día.",
-            )
-
-    st.divider()
-
-    # ── Métricas — cálculo de variables ───────────────────────────────────────
-    # Carga financiera (solo pasivos financieros: Hipotecario, Crédito consumo, Tarjeta)
-    if _ing > 0 and _cuotas_fin_clp:
-        _cf = calculator.carga_financiera(_cuotas_fin_clp, _ing)
-        _cf_pct = _cf * 100
-        _cf_icon = "🟢" if _cf < 0.35 else ("🟡" if _cf < 0.50 else "🔴")
-        _cf_label = "Saludable" if _cf < 0.35 else ("Precaución" if _cf < 0.50 else "Crítico")
-        _cf_val = f"{_cf_icon} {_cf_pct:.1f}%"
-        _cf_sub = f"{_cf_label} · Cuotas: $ {int(_total_cuotas_fin):,}/mes"
-        _cf_deuda = f"Deuda total: $ {int(_deuda_fin_total):,}"
-    elif _ing > 0:
-        _cf_val = "🟢 0.0%"
-        _cf_sub = "Sin compromisos financieros"
-        _cf_deuda = ""
-    else:
-        _cf_val = "—"
-        _cf_sub = "Define tu ingreso en Capa 1"
-        _cf_deuda = ""
-
-    # Posición de vida v2
-    _denominador_pdv = _ese + sum(_cuotas_clp)
-    if _denominador_pdv > 0:
-        _pdv = calculator.posicion_vida_v2(_liq, _ese, _cuotas_clp)
-        _pdv_icon = "🟢" if _pdv >= 3 else ("🟡" if _pdv >= 1 else "🔴")
-        _pdv_val = f"{_pdv_icon} {_pdv:.1f} meses"
-        _pdv_sub = "Liquidez / (Esenciales + Cuotas)"
-    else:
-        _pdv_val = "—"
-        _pdv_sub = "Agrega pasivos y define esenciales"
-
-    # Cobertura de deuda (activo = todas posiciones Activo_Liquido; deuda = solo financieros)
-    if _deuda_fin_total > 0:
-        _cob = calculator.cobertura_deuda(_activo_liq_total, _deuda_fin_total)
-        _cob_pct = _cob * 100
-        _cob_icon = "🟢" if _cob > 0.20 else ("🟡" if _cob > 0.10 else "🔴")
-        _cob_val = f"{_cob_icon} {_cob_pct:.1f}%"
-        _cob_sub = f"Liquidez: $ {int(_activo_liq_total):,} / Deuda fin."
-    else:
-        _cob_val = "—"
-        _cob_sub = "Sin deuda financiera registrada"
-
-    # Tasa de ahorro real
-    _aporte_afp_m = float(
-        (state.get_position("AFP_PRINCIPAL") or {}).get("Aporte_Mensual", 0)
-    )
-    _aporte_apv_m = sum(
-        float((state.get_position(p) or {}).get("Aporte_Mensual", 0))
-        for p in _all_apv_ids()
-    )
-    _aporte_inv_m = sum(
-        float((state.get_position(p) or {}).get("Aporte_Mensual", 0))
-        for p in state.list_positions(clase="Activo_Financiero")
-        if p.startswith("ACT_INV_")
-    )
-    _ing_params_liv = _pos("ING_PRINCIPAL")
-    if "Monto_Mensual" in _ing_params_liv:
-        _ing_live = float(_ing_params_liv["Monto_Mensual"])
-    elif "Ingreso_Mensual" in _ing_params_liv:
-        _ing_live = float(_ing_params_liv["Ingreso_Mensual"])
-    else:
-        _ing_live = float(st.session_state.get("ingreso_mensual", st.session_state.get("live_ing", 0)))
-    _ing_live = calculator.normalizar_a_clp(
-        _ing_live,
-        _ing_params_liv.get("Moneda", "CLP"),
-        _valor_uf, _valor_usd,
-    )
-    if _ing_live > 0:
-        _tasa = calculator.tasa_ahorro_real(
-            _aporte_afp_m + _aporte_apv_m + _aporte_inv_m, _ing_live
-        )
-        _tasa_pct = _tasa * 100
-        _tasa_icon = "🟢" if _tasa > 0.15 else ("🟡" if _tasa > 0.10 else "🔴")
-        _ahr_val = f"{_tasa_icon} {_tasa_pct:.1f}%"
-        _ahr_sub = "Inversión mensual / Ingreso"
-    else:
-        _ahr_val = "—"
-        _ahr_sub = "Define tu ingreso en Capa 1"
-
-    # Horizonte libre — formatear para display
-    _MESES_CORTO = ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
-                    "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
-    if _horizonte != "—":
-        try:
-            _y_h, _m_h = _horizonte.split("-")
-            _horizonte_display = f"{_MESES_CORTO[int(_m_h) - 1]} {_y_h}"
-        except Exception:
-            _horizonte_display = _horizonte
-    else:
-        _horizonte_display = "Sin compromisos"
-    _n_comp = len(_all_pasivo_ids())
-    _h_sub = f"{_n_comp} compromiso{'s' if _n_comp != 1 else ''}" if _n_comp else "Agrega pasivos"
-
-    # ── Métricas — tarjetas HTML/CSS ──────────────────────────────────────────
-    st.markdown(f"""
-<div style="display:flex;flex-direction:column;gap:12px;margin-bottom:8px;">
-  <div style="display:flex;gap:12px;">
-    <div style="flex:1;background:#1e2a3a;border-radius:8px;padding:20px;min-height:120px;">
-      <div style="font-size:11px;color:#8fa0b0;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">CARGA FINANCIERA</div>
-      <div style="font-size:36px;font-weight:700;color:#e8f0fe;">{_cf_val}</div>
-      <div style="font-size:12px;color:#8fa0b0;margin-top:8px;">{_cf_sub}</div>
-      {"<div style='font-size:11px;color:#6a7f8e;margin-top:4px;'>" + _cf_deuda + "</div>" if _cf_deuda else ""}
-    </div>
-    <div style="flex:1;background:#1e2a3a;border-radius:8px;padding:20px;min-height:120px;">
-      <div style="font-size:11px;color:#8fa0b0;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">POSICIÓN DE VIDA</div>
-      <div style="font-size:36px;font-weight:700;color:#e8f0fe;">{_pdv_val}</div>
-      <div style="font-size:12px;color:#8fa0b0;margin-top:8px;">{_pdv_sub}</div>
-    </div>
-  </div>
-  <div style="display:flex;gap:12px;">
-    <div style="flex:1;background:#1a2230;border-radius:8px;padding:16px;">
-      <div style="font-size:10px;color:#8fa0b0;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">COBERTURA DEUDA</div>
-      <div style="font-size:24px;font-weight:700;color:#e8f0fe;">{_cob_val}</div>
-      <div style="font-size:11px;color:#8fa0b0;margin-top:4px;">{_cob_sub}</div>
-    </div>
-    <div style="flex:1;background:#1a2230;border-radius:8px;padding:16px;">
-      <div style="font-size:10px;color:#8fa0b0;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">TASA DE AHORRO</div>
-      <div style="font-size:24px;font-weight:700;color:#e8f0fe;">{_ahr_val}</div>
-      <div style="font-size:11px;color:#8fa0b0;margin-top:4px;">{_ahr_sub}</div>
-    </div>
-    <div style="flex:1;background:#1a2230;border-radius:8px;padding:16px;">
-      <div style="font-size:10px;color:#8fa0b0;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">HORIZONTE LIBRE</div>
-      <div style="font-size:20px;font-weight:700;color:#e8f0fe;">🏁 {_horizonte_display}</div>
-      <div style="font-size:11px;color:#8fa0b0;margin-top:4px;">{_h_sub}</div>
-    </div>
-  </div>
-</div>""", unsafe_allow_html=True)
-
-    # Desglose de ingresos si hay arriendos
-    if _ing_arriendos > 0:
-        st.caption(
-            f"💰 Ingreso laboral: **$ {int(_ing_laboral):,}** · "
-            f"🏡 Arriendos: **$ {int(_ing_arriendos):,}** · "
-            f"Total: **$ {int(_ing):,}**"
-        )
-
-    st.divider()
-
-    # ── Flujo mensual — gráfico de barras apiladas ────────────────────────────
-    st.markdown("#### Flujo Mensual por Categoría")
-
-    # Construir series de 24 meses
-    _today_ch = date.today()
-    _periodos_ch: list[str] = []
-    _y_ch, _m_ch = _today_ch.year, _today_ch.month
-    for _ in range(24):
-        _periodos_ch.append(f"{_y_ch}-{_m_ch:02d}")
-        _m_ch += 1
-        if _m_ch > 12:
-            _m_ch = 1
-            _y_ch += 1
-
-    _imp_ch = calculator.normalizar_a_clp(
-        float(_pos("GAS_IMP_BUCKET").get("Monto_Mensual", 0)),
-        _pos("GAS_IMP_BUCKET").get("Moneda", _MONEDA),
-        _valor_uf, _valor_usd,
-    )
-    _asp_ch = calculator.normalizar_a_clp(
-        float(_pos("GAS_ASP_BUCKET").get("Monto_Mensual", 0)),
-        _pos("GAS_ASP_BUCKET").get("Moneda", _MONEDA),
-        _valor_uf, _valor_usd,
-    )
-
-    # Deuda financiera por período (solo Hipotecario, Crédito consumo, Tarjeta)
-    _deuda_ch: dict[str, float] = {}
-    for _p_ch in _pids_fin:
-        if _pos(_p_ch).get("bucket_vinculado"):
-            continue  # ya contado en _ese/_imp/_asp, no doblar
-        _tab_ch = st.session_state.get("schedules", {}).get(_p_ch)
-        if _tab_ch is None or _tab_ch.empty:
-            continue
-        _mon_ch = _pos(_p_ch).get("Moneda", "CLP")
-        for _per_ch in _periodos_ch:
-            _row_ch = _tab_ch[_tab_ch["Periodo"] == _per_ch]
-            if not _row_ch.empty:
-                _cuota_ch = abs(float(_row_ch["Flujo_Periodo"].iloc[0]))
-                _cuota_clp_ch = calculator.normalizar_a_clp(_cuota_ch, _mon_ch, _valor_uf, _valor_usd)
-                _deuda_ch[_per_ch] = _deuda_ch.get(_per_ch, 0.0) + _cuota_clp_ch
-
-    _ese_ser = [_ese] * 24
-    _imp_ser = [_imp_ch] * 24
-    _asp_ser = [_asp_ch] * 24
-    _deuda_ser = [_deuda_ch.get(p, 0.0) for p in _periodos_ch]
-    _exceso_ser = [
-        _ing - (_ese_ser[i] + _imp_ser[i] + _asp_ser[i] + _deuda_ser[i])
-        for i in range(24)
-    ]
-
-    if _ing > 0 or any(v > 0 for v in _deuda_ser):
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            name="Esenciales", x=_periodos_ch, y=_ese_ser,
-            marker_color="#1e4d8c",
-            hovertemplate="%{x}<br>Esenciales: %{y:,.0f}<extra></extra>",
-        ))
-        fig.add_trace(go.Bar(
-            name="Importantes", x=_periodos_ch, y=_imp_ser,
-            marker_color="#2e6da4",
-            hovertemplate="%{x}<br>Importantes: %{y:,.0f}<extra></extra>",
-        ))
-        fig.add_trace(go.Bar(
-            name="Aspiraciones", x=_periodos_ch, y=_asp_ser,
-            marker_color="#4a9fd4",
-            hovertemplate="%{x}<br>Aspiraciones: %{y:,.0f}<extra></extra>",
-        ))
-        fig.add_trace(go.Bar(
-            name="Deuda financiera", x=_periodos_ch, y=_deuda_ser,
-            marker_color="#c0392b",
-            hovertemplate="%{x}<br>Deuda fin.: %{y:,.0f}<extra></extra>",
-        ))
-        fig.add_trace(go.Bar(
-            name="Exceso/Déficit", x=_periodos_ch, y=_exceso_ser,
-            marker_color=["#27ae60" if v >= 0 else "#e74c3c" for v in _exceso_ser],
-            hovertemplate="%{x}<br>Exceso/Déficit: %{y:,.0f}<extra></extra>",
-        ))
-        fig.update_layout(
-            barmode="relative",
-            height=260,
-            margin=dict(l=0, r=0, t=8, b=0),
-            showlegend=True,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-                        font=dict(size=9)),
-            plot_bgcolor="rgba(0,0,0,0)",
-            paper_bgcolor="rgba(0,0,0,0)",
-            yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.1)", zeroline=True,
-                       zerolinecolor="#888"),
-            xaxis=dict(tickangle=-45, tickfont=dict(size=9)),
-        )
-        if _ing > 0:
-            fig.add_hline(
-                y=_ing, line_dash="dot", line_color="white", line_width=1.5,
-                annotation_text="Ingreso", annotation_font_color="white",
-                annotation_font_size=9,
-            )
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-
-        _meses_deficit = sum(1 for v in _exceso_ser if v < 0)
-        if _meses_deficit:
-            st.warning(f"⚠️ {_meses_deficit} meses en déficit en los próximos 24 meses.")
-        else:
-            st.success("✓ Sin meses en déficit en los próximos 24 meses.")
-    else:
-        st.caption("Agrega ingresos y compromisos para ver el flujo mensual.")
-
-
-
 # ── Sugerencias pendientes ────────────────────────────────────────────────────
 
 _sugerencias_c2 = st.session_state.get("sugerencias_pendientes", [])
@@ -2398,7 +2412,7 @@ if _sugerencias_c2:
             _col_sug_c2, _col_btns_c2 = st.columns([4, 2])
             with _col_sug_c2:
                 st.markdown(
-                    f"**{_sug_c2['descripcion']}** · *{_sug_c2['tipo']}*  \n"
+                    f"**{_sug_c2['descripcion']}**  —  *{_sug_c2['tipo']}*  \n"
                     f"Vincular cuota **{_monto_clp_c2}/mes** → {_bucket_lbl_c2}"
                 )
                 if _sug_c2.get("excede_espacio", False):
