@@ -188,11 +188,14 @@ def procesar_archivo(
             for m in movimientos
         ]
 
-    # Guardar en session_state
-    st.session_state["parser_movimientos_pendientes"] = [
-        _prop_a_dict(p) for p in propuestas
-    ]
-    st.session_state["parser_ultimo_archivo"] = Path(filepath).name
+    # Acumular en session_state (no reemplazar — puede haber varios archivos del mismo mes)
+    pendientes_list = st.session_state.setdefault("parser_movimientos_pendientes", [])
+    pendientes_list.extend(_prop_a_dict(p) for p in propuestas)
+
+    # Registrar nombre del archivo procesado
+    archivos_procesados = st.session_state.setdefault("parser_archivos_procesados", [])
+    archivos_procesados.append(Path(filepath).name)
+
     state.mark_dirty()
 
 
@@ -354,33 +357,63 @@ def _opciones_posicion(posiciones: dict) -> list[tuple[str, str]]:
 
 # ── UI — Sección de carga ─────────────────────────────────────────────────────
 
+_EMOJI_FUENTE = {
+    "itau_cta_cte": "🏦",
+    "itau_tc_nacional": "💳",
+    "itau_tc_internacional": "🌍",
+    "generic_pdf": "📄",
+    "generic_excel": "📊",
+}
+
+
 def _render_subir_archivo(posiciones: dict, api_key: str | None) -> None:
-    """Tab de subida de archivo local."""
-    uploaded = st.file_uploader(
-        "Sube tu cartola bancaria",
+    """Tab de subida de uno o varios archivos locales."""
+
+    uploaded_files = st.file_uploader(
+        "Selecciona uno o más archivos — "
+        "puedes cargar TC nacional, TC internacional "
+        "y cuenta corriente del mismo mes a la vez",
         type=_TIPOS_UPLOAD,
+        accept_multiple_files=True,
         help="Formatos soportados: PDF (Itaú y otros bancos), Excel (.xlsx/.xls), CSV",
     )
-    if uploaded is None:
+
+    if not uploaded_files:
         st.caption(
             "Soportado: Cartola Itaú cuenta corriente, "
             "TC Nacional, TC Internacional, y cualquier PDF/Excel/CSV de banco chileno."
         )
         return
 
-    suffix = Path(uploaded.name).suffix or ".pdf"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(uploaded.read())
-        tmp_path = tmp.name
+    ya_procesados: list[str] = st.session_state.get("parser_archivos_procesados", [])
+    hubo_nuevos = False
 
-    try:
-        procesar_archivo(tmp_path, posiciones, _valor_usd(), _valor_uf(), api_key)
-    finally:
+    for uploaded in uploaded_files:
+        nombre = uploaded.name
+
+        # Detectar duplicados por nombre en la sesión actual
+        if nombre in ya_procesados:
+            st.warning(f"⚠️ **{nombre}** ya fue procesado en esta sesión — omitiendo.")
+            continue
+
+        suffix = Path(nombre).suffix or ".pdf"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(uploaded.read())
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            tmp_path = tmp.name
+
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-    st.rerun()
+            procesar_archivo(tmp_path, posiciones, _valor_usd(), _valor_uf(), api_key)
+            hubo_nuevos = True
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    if hubo_nuevos:
+        st.rerun()
 
 
 def _render_inbox_drive(posiciones: dict, api_key: str | None) -> None:
@@ -718,8 +751,22 @@ with tab_inbox:
 pendientes = _pendientes()
 if pendientes:
     st.markdown("---")
-    archivo_nombre = st.session_state.get("parser_ultimo_archivo", "archivo")
-    st.markdown(f"### 2 — Revisar {len(pendientes)} movimientos de **{archivo_nombre}**")
+    st.markdown(f"### 2 — Revisar {len(pendientes)} movimientos")
+
+    # Resumen agrupado por fuente
+    from collections import Counter
+    fuentes = Counter(d.get("fuente", "generic_pdf") for d in pendientes)
+    lineas_resumen = []
+    for fuente, n in sorted(fuentes.items()):
+        em = _EMOJI_FUENTE.get(fuente, "📄")
+        lineas_resumen.append(f"{em} **{fuente}** — {n} movimientos")
+    st.markdown("**Archivos procesados:**\n" + "\n".join(f"- {l}" for l in lineas_resumen))
+
+    if st.button("🗑️ Limpiar todos", help="Descarta la lista actual y empieza de nuevo"):
+        st.session_state["parser_movimientos_pendientes"] = []
+        st.session_state["parser_archivos_procesados"] = []
+        st.rerun()
+
     _render_pendientes(posiciones)
 
 # ── SECCIÓN 3 — Otros ─────────────────────────────────────────────────────────
