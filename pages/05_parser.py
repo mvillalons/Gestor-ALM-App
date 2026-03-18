@@ -150,11 +150,20 @@ def procesar_archivo(
     valor_usd: float,
     valor_uf: float,
     anthropic_key: str | None,
+    filename: str = "",
+    file_size: int = 0,
 ) -> None:
     """
     Extrae y clasifica movimientos de un archivo de cartola.
     Guarda resultados en session_state["parser_movimientos_pendientes"].
     """
+    # ── Dedup: evitar reprocesar el mismo archivo en la misma sesión ──────────
+    _nombre = filename or Path(filepath).name
+    _file_key = f"{_nombre}_{file_size}"
+    _procesados: set[str] = st.session_state.get("parser_archivos_procesados", set())
+    if _file_key in _procesados:
+        return  # ya procesado, no reprocesar
+
     with st.spinner("Extrayendo movimientos..."):
         movimientos, formato = extraer_movimientos(
             filepath,
@@ -193,9 +202,9 @@ def procesar_archivo(
     pendientes_list = st.session_state.setdefault("parser_movimientos_pendientes", [])
     pendientes_list.extend(_prop_a_dict(p) for p in propuestas)
 
-    # Registrar nombre del archivo procesado
-    archivos_procesados = st.session_state.setdefault("parser_archivos_procesados", [])
-    archivos_procesados.append(Path(filepath).name)
+    # Marcar como procesado (set para O(1) lookup)
+    _procesados.add(_file_key)
+    st.session_state["parser_archivos_procesados"] = _procesados
 
     state.mark_dirty()
 
@@ -386,26 +395,32 @@ def _render_subir_archivo(posiciones: dict, api_key: str | None) -> None:
         )
         return
 
-    ya_procesados: list[str] = st.session_state.get("parser_archivos_procesados", [])
+    ya_procesados: set[str] = st.session_state.get("parser_archivos_procesados", set())
     hubo_nuevos = False
 
     for uploaded in uploaded_files:
         nombre = uploaded.name
+        tamano = uploaded.size or 0
+        file_key = f"{nombre}_{tamano}"
 
-        # Detectar duplicados por nombre en la sesión actual
-        if nombre in ya_procesados:
+        # Advertir si ya fue procesado (la función procesar_archivo lo omitirá igual)
+        if file_key in ya_procesados:
             st.warning(f"⚠️ **{nombre}** ya fue procesado en esta sesión — omitiendo.")
             continue
 
         suffix = Path(nombre).suffix or ".pdf"
+        contenido = uploaded.read()
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(uploaded.read())
+            tmp.write(contenido)
             tmp.flush()
             os.fsync(tmp.fileno())
             tmp_path = tmp.name
 
         try:
-            procesar_archivo(tmp_path, posiciones, _valor_usd(), _valor_uf(), api_key)
+            procesar_archivo(
+                tmp_path, posiciones, _valor_usd(), _valor_uf(), api_key,
+                filename=nombre, file_size=tamano,
+            )
             hubo_nuevos = True
         finally:
             try:
