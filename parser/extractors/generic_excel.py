@@ -97,6 +97,11 @@ def extraer(filepath: str) -> list[Movimiento]:
     )
     confianza = 0.9 if por_nombre >= 2 else 0.7
 
+    # Si la detección por nombre falló completamente, devolver [] para
+    # que normalizer.py active el fallback LLM (si hay api_key disponible).
+    if por_nombre == 0:
+        return []
+
     # Fallback por posición si no hay detección por nombre
     if col_fecha is None and len(columnas) >= 1:
         col_fecha = columnas[0]

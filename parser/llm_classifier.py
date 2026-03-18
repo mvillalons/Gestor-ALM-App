@@ -37,9 +37,17 @@ def _construir_catalogo(posiciones: dict) -> str:
     """Construye texto del catálogo de posiciones para el prompt."""
     lineas = ["Posiciones disponibles:"]
     for pid, params in posiciones.items():
-        clase = params.get("Clase", "")
-        desc = params.get("Descripcion", pid)
-        tipo = params.get("Tipo", "")
+        clase = str(params.get("Clase", "") or "")
+        if clase in ("nan", "None"):
+            clase = ""
+        desc_raw = params.get("Descripcion", pid)
+        desc = str(desc_raw if desc_raw is not None else pid)
+        if desc in ("nan", "None", ""):
+            desc = pid
+        tipo_raw = params.get("Tipo_Pasivo", params.get("Tipo", ""))
+        tipo = str(tipo_raw or "")
+        if tipo in ("nan", "None"):
+            tipo = ""
         lineas.append(f"  - {pid}: {desc} ({clase}{', ' + tipo if tipo else ''})")
     return "\n".join(lineas)
 

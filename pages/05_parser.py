@@ -160,6 +160,7 @@ def procesar_archivo(
             filepath,
             valor_usd_clp=valor_usd,
             valor_uf_clp=valor_uf,
+            anthropic_api_key=anthropic_key or "",
         )
 
     if not movimientos:
